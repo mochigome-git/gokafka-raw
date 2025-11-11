@@ -17,7 +17,7 @@ import (
 )
 
 // RunKafkaApp handles Kafka reader setup, consumer start, and graceful shutdown
-func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config, logger *zap.SugaredLogger, metricConfigs []config.MetricConfig) {
+func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config, logger *zap.SugaredLogger, rtSvc *service.RealtimeService) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -40,7 +40,14 @@ func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config,
 	stats := db.NewInsertStats()
 	fmt.Println("🟢🚀 Insert summary monitor started! Tracking inserts every 30 minutes...")
 
+	metricConfigs := rtSvc.GetMetricConfigs()
+
 	kafkaSvc := service.NewKafkaService(dbMgr, logger, metricConfigs)
+	// listen for realtime config updates
+	rtSvc.OnConfigUpdate(func(updated []config.MetricConfig) {
+		// logger.Infow("KafkaService updating metric configs", "count", len(updated))
+		kafkaSvc.UpdateMetricConfigs(updated)
+	})
 
 	done := make(chan struct{})
 	go func() {

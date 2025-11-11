@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"gokafka-raw/internal/config"
@@ -18,6 +19,7 @@ import (
 
 type KafkaService struct {
 	DBMgr         *db.DBManager
+	mu            sync.RWMutex
 	Logger        *zap.SugaredLogger
 	MetricConfigs []config.MetricConfig
 }
@@ -28,6 +30,13 @@ func NewKafkaService(dbMgr *db.DBManager, logger *zap.SugaredLogger, metricConfi
 		Logger:        logger,
 		MetricConfigs: metricConfigs,
 	}
+}
+
+func (k *KafkaService) UpdateMetricConfigs(newConfigs []config.MetricConfig) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.MetricConfigs = newConfigs
+	k.Logger.Infow("KafkaService metric configs updated", "count", len(newConfigs))
 }
 
 // ProcessMessage keeps using logger internally

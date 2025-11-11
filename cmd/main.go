@@ -38,5 +38,6 @@ func main() {
 	monitor.StartHealthCheck(dbMgr, rtSvc, sugar, ":8080")
 
 	// --- Run Kafka consumer app (blocking) ---
-	app.StartKafkaApp(ctx, dbMgr, cfg, sugar, rtSvc.GetMetricConfigs())
+	app.StartKafkaApp(ctx, dbMgr, cfg, sugar, rtSvc)
+
 }

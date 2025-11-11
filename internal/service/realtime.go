@@ -15,12 +15,15 @@ import (
 	"go.uber.org/zap"
 )
 
+type ConfigUpdateListener func([]config.MetricConfig)
+
 type RealtimeService struct {
 	client        *realtime.Client
 	logger        *zap.SugaredLogger
 	mu            sync.RWMutex
 	metricConfigs []config.MetricConfig
 	cfg           *config.Config
+	listeners     []ConfigUpdateListener
 }
 
 // NewRealtimeService creates a new RealtimeService instance.
@@ -68,7 +71,7 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 	// Wait until client is connected
 	for !r.client.IsConnected() {
 		fmt.Println("waiting for realtime client to connect...")
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(5000 * time.Millisecond)
 	}
 
 	return r.client.ListenToPostgresChanges(realtime.PostgresChangesOptions{
@@ -88,7 +91,8 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 		r.metricConfigs = configs
 		r.mu.Unlock()
 
-		r.logger.Infow("metric configs reloaded", "count", len(configs))
+		//r.logger.Infow("metric configs reloaded", "count", len(configs))
+		r.reloadMetricConfigs(configs)
 	})
 
 }
@@ -139,6 +143,25 @@ func (r *RealtimeService) GetMetricConfigs() []config.MetricConfig {
 	return append([]config.MetricConfig(nil), r.metricConfigs...)
 }
 
+// GetMetricConfig returns during runtime and copy to listener
+func (r *RealtimeService) OnConfigUpdate(listener ConfigUpdateListener) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listeners = append(r.listeners, listener)
+}
+
+// Reload MertricConfig to update kafka consumer
+func (r *RealtimeService) reloadMetricConfigs(newConfigs []config.MetricConfig) {
+	r.mu.Lock()
+	r.metricConfigs = newConfigs
+	listeners := append([]ConfigUpdateListener(nil), r.listeners...)
+	r.mu.Unlock()
+
+	for _, l := range listeners {
+		go l(newConfigs) // async notify
+	}
+}
+
 // ExtractProjectRef returns the project ref from SUPABASE_URL
 func ExtractProjectRef(supabaseURL string) (string, error) {
 	parsed, err := url.Parse(supabaseURL)
@@ -161,6 +184,7 @@ func (r *RealtimeService) LoadInitialMetricConfigs() error {
 	if err != nil {
 		return err
 	}
+
 	r.mu.Lock()
 	r.metricConfigs = configs
 	r.mu.Unlock()
