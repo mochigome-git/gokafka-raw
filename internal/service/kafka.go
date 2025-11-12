@@ -98,7 +98,23 @@ func (s *KafkaService) ProcessMessage(ctx context.Context, m kafka.Message, stat
 
 			break
 		}
+
 	}
+
+	// Handle realtime socket trigger for this device only
+	if msg.DeviceID != nil && *msg.DeviceID != "" {
+		deviceID := *msg.DeviceID
+		for _, cfg := range s.MetricConfigs {
+			// only trigger if the device in config matches the message
+			if cfg.DeviceID == deviceID && cfg.IsRealtime && cfg.IsActive {
+				if err := db.InsertRealtimeTrigger(ctx, s.DBMgr.Pool(), deviceID, s.Logger); err != nil {
+					s.Logger.Errorw("failed to insert realtime trigger", "error", err, "device", cfg.DeviceID)
+				}
+				break // found the matching device, no need to continue loop
+			}
+		}
+	}
+
 }
 
 // Internal consumer loop

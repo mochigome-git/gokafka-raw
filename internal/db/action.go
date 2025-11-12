@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"gokafka-raw/internal/model"
@@ -56,4 +58,55 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 	}
 
 	return err
+}
+
+// InsertRealtimeTrigger inserts a realtime signal into device.realtime_<device_name>
+// creates device.realtime_<device_id> if needed,
+// then inserts a single TRUE row to trigger Supabase Realtime.
+func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID string, logger *zap.SugaredLogger) error {
+	if deviceID == "" {
+		return fmt.Errorf("deviceID is required")
+	}
+
+	// sanitize: replace any illegal chars to make a valid table name
+	safeDeviceID := strings.ToLower(strings.ReplaceAll(deviceID, "-", "_"))
+	tableName := fmt.Sprintf("device.realtime_%s", safeDeviceID)
+
+	// ensure schema exists
+	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS device`); err != nil {
+		logger.Errorw("failed to ensure schema exists", "error", err)
+		return err
+	}
+
+	// ensure realtime table exists
+	createSQL := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id BIGSERIAL PRIMARY KEY,
+			inserted BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)
+	`, tableName)
+	if _, err := pool.Exec(ctx, createSQL); err != nil {
+		logger.Errorw("failed to create realtime table", "table", tableName, "error", err)
+		return err
+	}
+
+	// insert TRUE to trigger Supabase Realtime
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (inserted) VALUES (TRUE)`, tableName)
+	if _, err := pool.Exec(ctx, insertSQL); err != nil {
+		logger.Errorw("failed to insert realtime trigger", "table", tableName, "error", err)
+		return err
+	}
+
+	// optional: keep only last 1000 rows
+	cleanupSQL := fmt.Sprintf(`
+		DELETE FROM %s
+		WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT 1000)
+	`, tableName, tableName)
+	if _, err := pool.Exec(ctx, cleanupSQL); err != nil {
+		logger.Warnw("cleanup failed", "table", tableName, "error", err)
+	}
+
+	logger.Infow("realtime trigger inserted", "table", tableName)
+	return nil
 }

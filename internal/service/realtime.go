@@ -104,13 +104,15 @@ func (r *RealtimeService) loadMetricConfigs() ([]config.MetricConfig, error) {
 	}
 
 	var rows []struct {
-		ID              int    `json:"id"`
-		TenantID        string `json:"tenant_id"`
-		EntityID        string `json:"entity_id"`
-		Method          string `json:"method"`
-		IntervalSeconds int    `json:"interval_seconds"`
-		BucketLevel     string `json:"bucket_level"`
-		IsActive        bool   `json:"is_active"`
+		ID              int     `json:"id"`
+		TenantID        string  `json:"tenant_id"`
+		EntityID        string  `json:"entity_id"`
+		DeviceID        *string `json:"device_id"`
+		Method          string  `json:"method"`
+		IntervalSeconds int     `json:"interval_seconds"`
+		BucketLevel     string  `json:"bucket_level"`
+		IsActive        bool    `json:"is_active"`
+		IsRealtime      bool    `json:"is_realtime_socket"`
 	}
 
 	table := r.cfg.DBRealtimeTable
@@ -127,10 +129,12 @@ func (r *RealtimeService) loadMetricConfigs() ([]config.MetricConfig, error) {
 			ID:              row.ID,
 			TenantID:        row.TenantID,
 			EntityID:        row.EntityID,
+			DeviceID:        deref(row.DeviceID),
 			Method:          row.Method,
 			IntervalSeconds: row.IntervalSeconds,
 			BucketLevel:     row.BucketLevel,
 			IsActive:        row.IsActive,
+			IsRealtime:      row.IsRealtime,
 		}
 	}
 	return configs, nil
@@ -215,4 +219,11 @@ func (r *RealtimeService) IsAlive() bool {
 		return false
 	}
 	return r.client.IsClientAlive()
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
