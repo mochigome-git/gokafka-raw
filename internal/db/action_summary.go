@@ -11,6 +11,7 @@ type InsertStats struct {
 	sync.Mutex
 	TelemetryCount int
 	EventCount     int
+	RealtimeCount  int
 }
 
 // NewInsertStats starts the periodic logger
@@ -39,5 +40,12 @@ func (s *InsertStats) IncrementTelemetry() {
 func (s *InsertStats) IncrementEvent() {
 	s.Lock()
 	s.EventCount++
+	s.Unlock()
+}
+
+// IncrementRealtime increments realtime counter
+func (s *InsertStats) IncrementRealtime() {
+	s.Lock()
+	s.RealtimeCount++
 	s.Unlock()
 }

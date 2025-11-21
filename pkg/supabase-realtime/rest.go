@@ -1,4 +1,4 @@
-package realtime
+package supabase_realtime
 
 import (
 	"bytes"

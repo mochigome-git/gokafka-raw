@@ -1,4 +1,4 @@
-package realtime
+package supabase_realtime
 
 type TemplateMsg struct {
 	Event string `json:"event"`

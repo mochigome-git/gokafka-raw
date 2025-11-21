@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"gokafka-raw/internal/config"
-	"gokafka-raw/pkg/realtime"
+	supabase_realtime "gokafka-raw/pkg/supabase-realtime"
 
 	"go.uber.org/zap"
 )
@@ -18,7 +18,7 @@ import (
 type ConfigUpdateListener func([]config.MetricConfig)
 
 type RealtimeService struct {
-	client        *realtime.Client
+	client        *supabase_realtime.Client
 	logger        *zap.SugaredLogger
 	mu            sync.RWMutex
 	metricConfigs []config.MetricConfig
@@ -42,7 +42,7 @@ func (r *RealtimeService) CreateRealtimeClient(projectURL, apiKey string) error 
 		r.logger.Fatalw("failed to extract project ref", "error", err)
 	}
 
-	client := realtime.CreateRealtimeClient(projectRef, apiKey, r.logger.Desugar())
+	client := supabase_realtime.CreateRealtimeClient(projectRef, apiKey, r.logger.Desugar())
 	if client == nil {
 		return fmt.Errorf("failed to create realtime client")
 	}
@@ -74,7 +74,7 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 		time.Sleep(5000 * time.Millisecond)
 	}
 
-	return r.client.ListenToPostgresChanges(realtime.PostgresChangesOptions{
+	return r.client.ListenToPostgresChanges(supabase_realtime.PostgresChangesOptions{
 		Schema: schema,
 		Table:  table,
 		Filter: "*",

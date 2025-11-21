@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gokafka-raw/internal/db"
+	"gokafka-raw/internal/realtime"
 	"gokafka-raw/internal/service"
 
 	"go.uber.org/zap"
@@ -21,7 +22,7 @@ type HealthResponse struct {
 }
 
 // StartHealthCheck starts an HTTP server for health checks
-func StartHealthCheck(dbMgr *db.DBManager, rtSvc *service.RealtimeService, logger *zap.SugaredLogger, addr string) {
+func StartHealthCheck(dbMgr *db.DBManager, rtSvc *service.RealtimeService, logger *zap.SugaredLogger, hub *realtime.Hub, addr string) {
 	// --- Liveness ---
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -68,6 +69,11 @@ func StartHealthCheck(dbMgr *db.DBManager, rtSvc *service.RealtimeService, logge
 			Status:  statusMsg,
 			Details: healthDetails,
 		})
+	})
+
+	// --- WebSocket endpoint ---
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		realtime.ServeWS(hub, dbMgr, w, r)
 	})
 
 	logger.Infof("starting health check server on %s", addr)

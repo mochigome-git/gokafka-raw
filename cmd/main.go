@@ -9,6 +9,7 @@ import (
 	"gokafka-raw/internal/config"
 	"gokafka-raw/internal/db"
 	"gokafka-raw/internal/monitor"
+	"gokafka-raw/internal/realtime"
 )
 
 func main() {
@@ -34,10 +35,14 @@ func main() {
 	}
 	defer rtSvc.Shutdown()
 
+	// --- Initialize Realtime Hub ---
+	app.StartWebsocketApp(ctx, cfg, sugar)
+	hub := realtime.NewHub(sugar)
+
 	// --- Start Health Check ---
-	monitor.StartHealthCheck(dbMgr, rtSvc, sugar, ":8080")
+	monitor.StartHealthCheck(dbMgr, rtSvc, sugar, hub, ":8081")
 
 	// --- Run Kafka consumer app (blocking) ---
-	app.StartKafkaApp(ctx, dbMgr, cfg, sugar, rtSvc)
+	app.StartKafkaApp(ctx, dbMgr, cfg, sugar, rtSvc, hub)
 
 }

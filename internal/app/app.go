@@ -10,6 +10,7 @@ import (
 
 	"gokafka-raw/internal/config"
 	"gokafka-raw/internal/db"
+	"gokafka-raw/internal/realtime"
 	"gokafka-raw/internal/service"
 
 	"github.com/segmentio/kafka-go"
@@ -17,7 +18,7 @@ import (
 )
 
 // RunKafkaApp handles Kafka reader setup, consumer start, and graceful shutdown
-func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config, logger *zap.SugaredLogger, rtSvc *service.RealtimeService) {
+func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config, logger *zap.SugaredLogger, rtSvc *service.RealtimeService, hub *realtime.Hub) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -42,7 +43,7 @@ func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config,
 
 	metricConfigs := rtSvc.GetMetricConfigs()
 
-	kafkaSvc := service.NewKafkaService(dbMgr, logger, metricConfigs)
+	kafkaSvc := service.NewKafkaService(dbMgr, logger, metricConfigs, hub)
 	// listen for realtime config updates
 	rtSvc.OnConfigUpdate(func(updated []config.MetricConfig) {
 		// logger.Infow("KafkaService updating metric configs", "count", len(updated))
@@ -100,4 +101,19 @@ func StartRealtimeApp(ctx context.Context, cfg *config.Config, logger *zap.Sugar
 	}
 
 	return rtSvc, nil
+}
+
+func StartWebsocketApp(ctx context.Context, cfg *config.Config, logger *zap.SugaredLogger) error {
+	jwksURL := fmt.Sprintf(cfg.DBRealtimeURL)
+	jwks, err := realtime.FetchJWKS(jwksURL)
+	if err != nil {
+		logger.Fatalw("failed to fetch Supabase JWKS", "error", err)
+		return err
+	}
+
+	// Store it globally
+	realtime.CachedJWKS = jwks // <- make sure this is your global variable
+
+	logger.Infow("Supabase JWKS fetched successfully")
+	return nil
 }

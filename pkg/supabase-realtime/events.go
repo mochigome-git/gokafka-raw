@@ -1,4 +1,4 @@
-package realtime
+package supabase_realtime
 
 // Channel Events
 const JOIN_EVENT = "phx_join"

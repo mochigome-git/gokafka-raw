@@ -12,6 +12,7 @@ import (
 	"gokafka-raw/internal/config"
 	"gokafka-raw/internal/db"
 	"gokafka-raw/internal/model"
+	"gokafka-raw/internal/realtime"
 
 	"github.com/segmentio/kafka-go"
 	"go.uber.org/zap"
@@ -22,14 +23,57 @@ type KafkaService struct {
 	mu            sync.RWMutex
 	Logger        *zap.SugaredLogger
 	MetricConfigs []config.MetricConfig
+	RealtimeHub   *realtime.Hub
+
+	// Channels
+	processCh   chan ProcessJob
+	telemetryCh chan func()   // telemetry insert
+	realtimeCh  chan func()   // realtime insert
+	eventCh     chan func()   // event insert
+	insertSem   chan struct{} // semaphore to limit concurrent inserts
+
+	// Counters
+	activeProcessWorkers int32
+	activeInsertWorkers  int32
+	RealtimeCount        int32
 }
 
-func NewKafkaService(dbMgr *db.DBManager, logger *zap.SugaredLogger, metricConfigs []config.MetricConfig) *KafkaService {
-	return &KafkaService{
+type ProcessJob struct {
+	Msg   kafka.Message
+	Ctx   context.Context
+	Stats *db.InsertStats
+}
+
+// Constructor
+func NewKafkaService(dbMgr *db.DBManager, logger *zap.SugaredLogger, metricConfigs []config.MetricConfig, hub *realtime.Hub) *KafkaService {
+	maxInsertWorkers := 10
+
+	s := &KafkaService{
 		DBMgr:         dbMgr,
 		Logger:        logger,
 		MetricConfigs: metricConfigs,
+		RealtimeHub:   hub,
+
+		processCh:   make(chan ProcessJob, 1000),
+		telemetryCh: make(chan func(), 1000),
+		realtimeCh:  make(chan func(), 500),
+		eventCh:     make(chan func(), 500),
+		insertSem:   make(chan struct{}, maxInsertWorkers),
 	}
+
+	// Start JSON/Data workers
+	for i := 0; i < 10; i++ {
+		go s.processWorker()
+	}
+
+	// Start insert workers per type
+	for i := 0; i < maxInsertWorkers; i++ {
+		go s.insertWorker(s.telemetryCh)
+		go s.insertWorker(s.realtimeCh)
+		go s.insertWorker(s.eventCh)
+	}
+
+	return s
 }
 
 func (k *KafkaService) UpdateMetricConfigs(newConfigs []config.MetricConfig) {
@@ -39,82 +83,84 @@ func (k *KafkaService) UpdateMetricConfigs(newConfigs []config.MetricConfig) {
 	k.Logger.Infow("KafkaService metric configs updated", "count", len(newConfigs))
 }
 
-// ProcessMessage keeps using logger internally
-func (s *KafkaService) ProcessMessage(ctx context.Context, m kafka.Message, stats *db.InsertStats) {
+func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message, ctx context.Context, stats *db.InsertStats) {
+	entityID := resolveEntityID(msg)
 
-	var wrapper model.KafkaWrapper
-	if err := json.Unmarshal(m.Value, &wrapper); err != nil {
-		s.Logger.Errorw("failed to parse wrapper message", "error", err)
-		return
+	// Telemetry raw
+	s.telemetryCh <- func() {
+		if err := db.InsertTelemetryRaw(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
+			s.Logger.Errorw("failed to insert telemetry_raw", "error", err)
+		} else {
+			stats.IncrementTelemetry()
+		}
 	}
 
-	var msg model.TelemetryMessage
-	if err := json.Unmarshal([]byte(wrapper.Payload), &msg); err != nil {
-		s.Logger.Errorw("failed to parse telemetry payload", "error", err)
-		return
-	}
-
-	if err := msg.PopulateData([]byte(wrapper.Payload)); err != nil {
-		s.Logger.Errorw("failed to populate data field", "error", err)
-		return
-	}
-
-	if err := db.InsertTelemetryRaw(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
-		s.Logger.Errorw("failed to insert telemetry_raw", "error", err, "msg", msg)
-	} else {
-		stats.IncrementTelemetry()
-	}
-
-	var entityID string
-	if msg.DeviceID != nil && *msg.DeviceID != "" {
-		entityID = *msg.DeviceID
-	} else if msg.MachineID != nil && *msg.MachineID != "" {
-		entityID = *msg.MachineID
-	}
-
+	// Metrics
 	for _, cfg := range s.MetricConfigs {
-		if cfg.TenantID == msg.TenantID && cfg.Method == "event" && cfg.EntityID == entityID {
-			var deviceIDPtr, machineIDPtr *string
-			if msg.DeviceID != nil && *msg.DeviceID != "" {
-				deviceIDPtr = msg.DeviceID
-			}
-			if msg.MachineID != nil && *msg.MachineID != "" {
-				machineIDPtr = msg.MachineID
+		if cfg.TenantID != msg.TenantID || cfg.EntityID != entityID {
+			continue
+		}
+
+		switch cfg.Method {
+		case "realtime":
+			// atomic.AddInt32(&s.RealtimeCount, 1)
+			// fmt.Println(atomic.LoadInt32(&s.RealtimeCount), "realtime go")
+
+			s.realtimeCh <- func() {
+				if err := db.InsertRealtimeMetric(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
+					s.Logger.Errorw("failed to insert realtime metric", "error", err)
+				} else {
+					stats.IncrementRealtime()
+
+					if s.RealtimeHub != nil && msg.DeviceID != nil {
+						payload, _ := json.Marshal(msg)
+						// Fully non-blocking broadcast
+
+						go func(tid string, did string, p []byte) {
+							s.RealtimeHub.BroadcastTo(tid, did, p)
+						}(msg.TenantID, *msg.DeviceID, payload)
+					}
+				}
+
 			}
 
+		case "event":
 			eventMsg := model.EventMetricMessage{
 				TenantID:  msg.TenantID,
-				DeviceID:  deviceIDPtr,
-				MachineID: machineIDPtr,
+				DeviceID:  msg.DeviceID,
+				MachineID: msg.MachineID,
 				LotID:     msg.LotID,
 				Data:      msg.Data,
 			}
 
-			if err := db.InsertEventMetric(ctx, s.DBMgr.Pool(), eventMsg, m.Time, s.Logger); err != nil {
-				s.Logger.Errorw("failed to insert event metric", "error", err, "msg", eventMsg)
-			} else {
-				stats.IncrementEvent()
+			s.eventCh <- func() {
+				if err := db.InsertEventMetric(ctx, s.DBMgr.Pool(), eventMsg, m.Time, s.Logger); err != nil {
+					s.Logger.Errorw("failed to insert event metric", "error", err)
+				} else {
+					stats.IncrementEvent()
+				}
 			}
-
-			break
 		}
-
 	}
 
-	// Handle realtime socket trigger for this device only
+	// Realtime trigger
 	if msg.DeviceID != nil && *msg.DeviceID != "" {
 		deviceID := *msg.DeviceID
 		for _, cfg := range s.MetricConfigs {
-			// only trigger if the device in config matches the message
 			if cfg.DeviceID == deviceID && cfg.IsRealtime && cfg.IsActive {
-				if err := db.InsertRealtimeTrigger(ctx, s.DBMgr.Pool(), deviceID, s.Logger); err != nil {
-					s.Logger.Errorw("failed to insert realtime trigger", "error", err, "device", cfg.DeviceID)
+				s.realtimeCh <- func() {
+					if err := db.InsertRealtimeTrigger(ctx, s.DBMgr.Pool(), deviceID, s.Logger); err != nil {
+						s.Logger.Errorw("failed to insert realtime trigger", "error", err)
+					}
 				}
-				break // found the matching device, no need to continue loop
+				break
 			}
 		}
 	}
+}
 
+func (s *KafkaService) EnqueueMessage(ctx context.Context, m kafka.Message, stats *db.InsertStats) {
+	s.processCh <- ProcessJob{Msg: m, Ctx: ctx, Stats: stats}
 }
 
 // Internal consumer loop
@@ -141,7 +187,7 @@ func (s *KafkaService) consumeLoop(ctx context.Context, reader *kafka.Reader, st
 			return fmt.Errorf("error reading message: %w", err)
 		}
 
-		s.ProcessMessage(ctx, m, stats)
+		s.EnqueueMessage(ctx, m, stats)
 	}
 
 }

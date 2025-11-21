@@ -60,6 +60,28 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 	return err
 }
 
+// Realtime
+func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.TelemetryMessage, logger *zap.SugaredLogger) error {
+	// Use validated JSON marshaling
+	dataJSON, err := model.ValidateJSON(msg.Data)
+	if err != nil {
+		logger.Errorw("failed to marshal realtime data", "error", err, "msg", msg)
+		return err
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO analytics.realtime_metrics 
+			(tenant_id, device_id, machine_id, core_1, core_2, core_3, data, lot_id, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+	`, msg.TenantID, msg.DeviceID, msg.MachineID, msg.Core1, msg.Core2, msg.Core3, string(dataJSON), msg.LotID)
+
+	if err != nil {
+		logger.Errorw("failed to insert analytics.realtime_metrics ", "error", err, "msg", msg)
+	}
+
+	return err
+}
+
 // InsertRealtimeTrigger inserts a realtime signal into device.realtime_<device_name>
 // creates device.realtime_<device_id> if needed,
 // then inserts a single TRUE row to trigger Supabase Realtime.
@@ -107,6 +129,25 @@ func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID str
 		logger.Warnw("cleanup failed", "table", tableName, "error", err)
 	}
 
-	logger.Infow("realtime trigger inserted", "table", tableName)
+	// logger.Infow("realtime trigger inserted", "table", tableName)
 	return nil
+}
+
+func SelectTenantIDByUserID(ctx context.Context, pool *pgxpool.Pool, userID string,
+) (string, error) {
+
+	var tenantID string
+
+	err := pool.QueryRow(ctx, `
+		SELECT tenant_id
+		FROM user_tenants
+		WHERE user_id = $1
+		LIMIT 1
+	`, userID).Scan(&tenantID)
+
+	if err != nil {
+		return "", err
+	}
+
+	return tenantID, nil
 }
