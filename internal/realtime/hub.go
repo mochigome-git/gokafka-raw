@@ -8,13 +8,13 @@ import (
 
 type SubscriptionKey struct {
 	TenantID string
-	DeviceID string
+	DeviceID string // keep field name for backward compatibility
 }
 
 type Hub struct {
 	mu sync.RWMutex
 
-	// room mapping: (tenant+device) -> clients
+	// room mapping: (tenant+device or tenant+machine) -> clients
 	rooms map[SubscriptionKey]map[*Client]bool
 
 	// reverse mapping: client -> subscribed keys
@@ -30,6 +30,7 @@ func NewHub(logger *zap.SugaredLogger) *Hub {
 	}
 }
 
+// Subscribe adds a client to a subscription key
 func (h *Hub) Subscribe(key SubscriptionKey, c *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -45,6 +46,7 @@ func (h *Hub) Subscribe(key SubscriptionKey, c *Client) {
 	h.clientSubs[c][key] = true
 }
 
+// Unsubscribe removes a client from all subscriptions
 func (h *Hub) Unsubscribe(c *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -60,9 +62,16 @@ func (h *Hub) Unsubscribe(c *Client) {
 	delete(h.clientSubs, c)
 }
 
-func (h *Hub) BroadcastTo(tenantID, deviceID string, msg []byte) {
-	key := SubscriptionKey{TenantID: tenantID, DeviceID: deviceID}
+// BroadcastTo sends message to all clients subscribed to either deviceID or machineID
+func (h *Hub) BroadcastTo(tenantID, deviceID, machineID string, msg []byte) {
+	// broadcast by deviceID
+	h.broadcastKey(SubscriptionKey{TenantID: tenantID, DeviceID: deviceID}, msg)
+	// broadcast by machineID
+	h.broadcastKey(SubscriptionKey{TenantID: tenantID, DeviceID: machineID}, msg)
+}
 
+// broadcastKey sends message to clients for a single subscription key
+func (h *Hub) broadcastKey(key SubscriptionKey, msg []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -76,8 +85,13 @@ func (h *Hub) BroadcastTo(tenantID, deviceID string, msg []byte) {
 		case client.send <- msg:
 			// delivered
 		default:
-			// slow client -> skip
-
+			// skip slow client
 		}
 	}
+}
+
+// IsDeviceAllowed checks if client can subscribe to a device or machine
+func (h *Hub) IsDeviceAllowed(tenantID, deviceID string) bool {
+	// TODO: replace with DB/cache lookup
+	return true
 }

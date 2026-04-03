@@ -28,8 +28,9 @@ func NewClient(conn *websocket.Conn, hub *Hub, userID, tenantID string) *Client 
 }
 
 type SubscribeMessage struct {
-	Action    string   `json:"action"`
-	DeviceIDs []string `json:"device_ids"`
+	Action     string   `json:"action"`
+	DeviceIDs  []string `json:"device_ids,omitempty"`
+	MachineIDs []string `json:"machine_ids,omitempty"`
 }
 
 func (c *Client) ReadPump() {
@@ -53,20 +54,21 @@ func (c *Client) ReadPump() {
 		}
 
 		if req.Action == "subscribe" {
-			for _, deviceID := range req.DeviceIDs {
+			// merge device_ids + machine_ids as keys
+			allIDs := append([]string{}, req.DeviceIDs...)
+			allIDs = append(allIDs, req.MachineIDs...)
 
-				// Verify device ownership before subscribing
-				if !c.hub.IsDeviceAllowed(c.tenantID, deviceID) {
-					fmt.Println("❌ Device not allowed:", "userID", c.userID,
-						"deviceID", deviceID)
+			for _, id := range allIDs {
+				// use id directly for subscription, could be device or machine
+				if !c.hub.IsDeviceAllowed(c.tenantID, id) {
+					fmt.Println("❌ Not allowed:", "userID", c.userID, "id", id)
 					continue
 				}
 
-				fmt.Println("🟢 Subscribing to device:", "userID", c.userID,
-					"deviceID", deviceID)
+				fmt.Println("🟢 Subscribing to:", "userID", c.userID, "id", id)
 				c.hub.Subscribe(SubscriptionKey{
 					TenantID: c.tenantID,
-					DeviceID: deviceID,
+					DeviceID: id, // keep field name as "DeviceID" internally
 				}, c)
 			}
 		} else {

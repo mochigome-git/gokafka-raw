@@ -115,11 +115,16 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 					if s.RealtimeHub != nil && msg.DeviceID != nil {
 						payload, _ := json.Marshal(msg)
 						// Fully non-blocking broadcast
+						go func(tid string, did string, mid *string, p []byte) {
+							machineID := ""
+							if mid != nil {
+								machineID = *mid
+							}
 
-						go func(tid string, did string, p []byte) {
-							s.RealtimeHub.BroadcastTo(tid, did, p)
-						}(msg.TenantID, *msg.DeviceID, payload)
+							s.RealtimeHub.BroadcastTo(tid, did, machineID, p)
+						}(msg.TenantID, *msg.DeviceID, msg.MachineID, payload)
 					}
+
 				}
 
 			}

@@ -40,7 +40,7 @@ func main() {
 	hub := realtime.NewHub(sugar)
 
 	// --- Start Health Check ---
-	monitor.StartHealthCheck(dbMgr, rtSvc, sugar, hub, ":8081")
+	monitor.StartHealthCheck(dbMgr, rtSvc, sugar, hub, ":8080")
 
 	// --- Run Kafka consumer app (blocking) ---
 	app.StartKafkaApp(ctx, dbMgr, cfg, sugar, rtSvc, hub)

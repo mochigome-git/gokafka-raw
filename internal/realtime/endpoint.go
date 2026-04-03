@@ -118,8 +118,3 @@ func ServeWS(hub *Hub, dbMgr *db.DBManager, w http.ResponseWriter, r *http.Reque
 	go client.WritePump()
 	client.ReadPump()
 }
-
-func (h *Hub) IsDeviceAllowed(tenantID, deviceID string) bool {
-	// TODO: replace with DB/cache lookup
-	return true
-}
