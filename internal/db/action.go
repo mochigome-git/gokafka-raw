@@ -34,7 +34,8 @@ func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.Telem
 	return err
 }
 
-// InsertEventMetric inserts an event metric message into event_metrics table
+// InsertEventMetric inserts an event metric into analytics.metrics with resolution='event'
+// Previously wrote to analytics.event_metrics
 func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventMetricMessage, createdAt time.Time, logger *zap.SugaredLogger) error {
 	if msg.DeviceID == nil && msg.MachineID == nil {
 		logger.Warnw("skipping event metric: either device_id or machine_id must be provided", "msg", msg)
@@ -48,21 +49,25 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 	}
 
 	_, err = pool.Exec(ctx, `
-		INSERT INTO analytics.event_metrics
-			(tenant_id, machine_id, device_id, data, lot_id, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6)
-	`, msg.TenantID, msg.MachineID, msg.DeviceID, string(dataJSON), msg.LotID, createdAt)
+		INSERT INTO analytics.metrics
+			(tenant_id, machine_id, device_id, resolution, kind, bucket_start, data, lot_id)
+		VALUES ($1,$2,$3,'event','event',$4,$5,$6)
+		ON CONFLICT (tenant_id, entity_id, resolution, kind, bucket_start)
+		DO UPDATE SET
+			data   = EXCLUDED.data,
+			lot_id = EXCLUDED.lot_id
+	`, msg.TenantID, msg.MachineID, msg.DeviceID, createdAt, string(dataJSON), msg.LotID)
 
 	if err != nil {
-		logger.Errorw("failed to insert event_metric", "error", err, "msg", msg)
+		logger.Errorw("failed to insert event metric into analytics.metrics", "error", err, "msg", msg)
 	}
 
 	return err
 }
 
-// Realtime
+// InsertRealtimeMetric inserts a realtime metric into analytics.raw_metrics
+// Previously wrote to analytics.realtime_metrics
 func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.TelemetryMessage, logger *zap.SugaredLogger) error {
-	// Use validated JSON marshaling
 	dataJSON, err := model.ValidateJSON(msg.Data)
 	if err != nil {
 		logger.Errorw("failed to marshal realtime data", "error", err, "msg", msg)
@@ -70,13 +75,13 @@ func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.Tel
 	}
 
 	_, err = pool.Exec(ctx, `
-		INSERT INTO analytics.realtime_metrics 
+		INSERT INTO analytics.raw_metrics
 			(tenant_id, device_id, machine_id, core_1, core_2, core_3, data, lot_id, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
 	`, msg.TenantID, msg.DeviceID, msg.MachineID, msg.Core1, msg.Core2, msg.Core3, string(dataJSON), msg.LotID)
 
 	if err != nil {
-		logger.Errorw("failed to insert analytics.realtime_metrics ", "error", err, "msg", msg)
+		logger.Errorw("failed to insert into analytics.raw_metrics", "error", err, "msg", msg)
 	}
 
 	return err
