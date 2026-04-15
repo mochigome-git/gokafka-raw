@@ -50,9 +50,9 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO analytics.metrics
-			(tenant_id, machine_id, device_id, resolution, kind, bucket_start, data, lot_id)
+			(tenant_id, machine_id, device_id, resolution, kind, created_at, data, lot_id)
 		VALUES ($1,$2,$3,'event','event',$4,$5,$6)
-		ON CONFLICT (tenant_id, entity_id, resolution, kind, bucket_start)
+		ON CONFLICT (tenant_id, entity_id, resolution, kind, created_at)
 		DO UPDATE SET
 			data   = EXCLUDED.data,
 			lot_id = EXCLUDED.lot_id
