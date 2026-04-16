@@ -50,13 +50,16 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO analytics.metrics
-			(tenant_id, machine_id, device_id, resolution, kind, created_at, data, lot_id)
-		VALUES ($1,$2,$3,'event','event',$4,$5,$6)
+			(tenant_id, machine_id, device_id, resolution, kind, created_at, data, lot_id, core_1, core_2, core_3)
+		VALUES ($1,$2,$3,'event','event',$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (tenant_id, entity_id, resolution, kind, created_at)
 		DO UPDATE SET
 			data   = EXCLUDED.data,
-			lot_id = EXCLUDED.lot_id
-	`, msg.TenantID, msg.MachineID, msg.DeviceID, createdAt, string(dataJSON), msg.LotID)
+			lot_id = EXCLUDED.lot_id,
+			core_1 = COALESCE(EXCLUDED.core_1, analytics.metrics.core_1),
+			core_2 = COALESCE(EXCLUDED.core_2, analytics.metrics.core_2),
+			core_3 = COALESCE(EXCLUDED.core_3, analytics.metrics.core_3)
+	`, msg.TenantID, msg.MachineID, msg.DeviceID, createdAt, string(dataJSON), msg.LotID, msg.Core1, msg.Core2, msg.Core3)
 
 	if err != nil {
 		logger.Errorw("failed to insert event metric into analytics.metrics", "error", err, "msg", msg)
