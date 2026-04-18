@@ -31,6 +31,9 @@ func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.Telem
 		logger.Errorw("failed to insert telemetry_raw", "error", err, "msg", msg)
 	}
 
+	// update device online status
+	_ = UpdateDeviceOnline(ctx, pool, msg.DeviceID, logger)
+
 	return err
 }
 
@@ -158,4 +161,26 @@ func SelectTenantIDByUserID(ctx context.Context, pool *pgxpool.Pool, userID stri
 	}
 
 	return tenantID, nil
+}
+
+// UpdateDeviceOnline updates last_seen and status to online for a device
+func UpdateDeviceOnline(ctx context.Context, pool *pgxpool.Pool, deviceID *string, logger *zap.SugaredLogger) error {
+	if deviceID == nil || *deviceID == "" {
+		return nil
+	}
+
+	_, err := pool.Exec(ctx, `
+		UPDATE device.device_list
+		SET 
+			last_seen = NOW(),
+			status = 'online'
+		WHERE id = $1
+		AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL '1 minute')
+	`, *deviceID)
+
+	if err != nil {
+		logger.Errorw("failed to update device online status", "device_id", *deviceID, "error", err)
+	}
+
+	return err
 }
