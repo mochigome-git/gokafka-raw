@@ -1,25 +1,40 @@
 package model
 
+import (
+	"encoding/json"
+)
+
 type TelemetryMessage struct {
-	TenantID  string         `json:"tenant_id"`
-	DeviceID  *string        `json:"device_id,omitempty"`
-	MachineID *string        `json:"machine_id,omitempty"`
-	Core1     *StringFloat64 `json:"core_1,omitempty"`
-	Core2     *StringFloat64 `json:"core_2,omitempty"`
-	Core3     *StringFloat64 `json:"core_3,omitempty"`
-	LotID     *string        `json:"lot_id,omitempty"`
-	Data      map[string]any `json:"data"`
+	TenantID  string  `json:"tenant_id"`
+	DeviceID  *string `json:"device_id"`
+	MachineID *string `json:"machine_id"`
+	LotID     *string `json:"lot_id"`
+
+	// Fast-path aggregatable slots
+	MetricA *float64 `json:"metric_a"`
+	MetricB *float64 `json:"metric_b"`
+	MetricC *float64 `json:"metric_c"`
+
+	// Structured payload sections
+	Readings json.RawMessage `json:"readings"` // raw sensor values
+	Output   json.RawMessage `json:"output"`   // pass/fail, counts (nil = pure sensor)
+	Status   json.RawMessage `json:"status"`   // device state, counters
+	Limits   json.RawMessage `json:"limits"`   // thresholds at time of capture
 }
 
+// Event metric message — subset used for event inserts
 type EventMetricMessage struct {
-	TenantID  string         `json:"tenant_id"`
-	DeviceID  *string        `json:"device_id,omitempty"`
-	MachineID *string        `json:"machine_id,omitempty"`
-	Core1     *StringFloat64 `json:"core_1,omitempty"`
-	Core2     *StringFloat64 `json:"core_2,omitempty"`
-	Core3     *StringFloat64 `json:"core_3,omitempty"`
-	LotID     *string        `json:"lot_id,omitempty"`
-	Data      map[string]any `json:"data"`
+	TenantID  string          `json:"tenant_id"`
+	DeviceID  *string         `json:"device_id"`
+	MachineID *string         `json:"machine_id"`
+	LotID     *string         `json:"lot_id"`
+	MetricA   *float64        `json:"metric_a"`
+	MetricB   *float64        `json:"metric_b"`
+	MetricC   *float64        `json:"metric_c"`
+	Readings  json.RawMessage `json:"readings"`
+	Output    json.RawMessage `json:"output"`
+	Status    json.RawMessage `json:"status"`
+	Limits    json.RawMessage `json:"limits"`
 }
 
 // Added the key needed

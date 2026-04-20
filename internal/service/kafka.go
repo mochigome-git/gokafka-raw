@@ -135,10 +135,13 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 				DeviceID:  msg.DeviceID,
 				MachineID: msg.MachineID,
 				LotID:     msg.LotID,
-				Data:      msg.Data,
-				Core1:     msg.Core1,
-				Core2:     msg.Core2,
-				Core3:     msg.Core3,
+				MetricA:   msg.MetricA,
+				MetricB:   msg.MetricB,
+				MetricC:   msg.MetricC,
+				Readings:  msg.Readings,
+				Output:    msg.Output,
+				Status:    msg.Status,
+				Limits:    msg.Limits,
 			}
 
 			s.eventCh <- func() {

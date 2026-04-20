@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -12,135 +13,161 @@ import (
 	"go.uber.org/zap"
 )
 
-// InsertTelemetryRaw inserts a telemetry message into telemetry_raw table
+// InsertTelemetryRaw inserts into telemetry.telemetry_raw (new structure)
 func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.TelemetryMessage, logger *zap.SugaredLogger) error {
-	// Use validated JSON marshaling
-	dataJSON, err := model.ValidateJSON(msg.Data)
+	readings, _ := model.ValidateJSON(msg.Readings)
+	output, _ := model.ValidateJSON(msg.Output)
+	status, _ := model.ValidateJSON(msg.Status)
+	limits, _ := model.ValidateJSON(msg.Limits)
+
+	_, err := pool.Exec(ctx, `
+        INSERT INTO telemetry.telemetry_raw
+            (tenant_id, device_id, machine_id, lot_id,
+             metric_a, metric_b, metric_c,
+             readings, output, status, limits,
+             created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+    `,
+		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
+		msg.MetricA, msg.MetricB, msg.MetricC,
+		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
+	)
+
 	if err != nil {
-		logger.Errorw("failed to marshal telemetry data", "error", err, "msg", msg)
+		logger.Errorw("failed to insert telemetry_raw", "error", err)
 		return err
 	}
 
-	_, err = pool.Exec(ctx, `
-		INSERT INTO telemetry.telemetry_raw 
-			(tenant_id, device_id, machine_id, core_1, core_2, core_3, data, lot_id, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-	`, msg.TenantID, msg.DeviceID, msg.MachineID, msg.Core1, msg.Core2, msg.Core3, string(dataJSON), msg.LotID)
-
-	if err != nil {
-		logger.Errorw("failed to insert telemetry_raw", "error", err, "msg", msg)
-	}
-
-	// update device online status
 	_ = UpdateDeviceOnline(ctx, pool, msg.DeviceID, logger)
-
-	return err
+	return nil
 }
 
-// InsertEventMetric inserts an event metric into analytics.metrics with resolution='event'
-// Previously wrote to analytics.event_metrics
+// InsertEventMetric inserts into analytics.metrics with resolution='event'
 func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventMetricMessage, createdAt time.Time, logger *zap.SugaredLogger) error {
 	if msg.DeviceID == nil && msg.MachineID == nil {
-		logger.Warnw("skipping event metric: either device_id or machine_id must be provided", "msg", msg)
+		logger.Warnw("skipping event metric: device_id or machine_id required")
 		return nil
 	}
 
-	dataJSON, err := model.ValidateJSON(msg.Data)
+	readings, _ := model.ValidateJSON(msg.Readings)
+	output, _ := model.ValidateJSON(msg.Output)
+	status, _ := model.ValidateJSON(msg.Status)
+	limits, _ := model.ValidateJSON(msg.Limits)
+
+	_, err := pool.Exec(ctx, `
+        INSERT INTO analytics.metrics
+            (tenant_id, device_id, machine_id, lot_id,
+             resolution, created_at,
+             metric_a, metric_b, metric_c,
+             readings, output, status, limits)
+        VALUES ($1,$2,$3,$4,'event',$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (tenant_id, entity_id, resolution, created_at)
+        DO UPDATE SET
+            metric_a = COALESCE(EXCLUDED.metric_a, analytics.metrics.metric_a),
+            metric_b = COALESCE(EXCLUDED.metric_b, analytics.metrics.metric_b),
+            metric_c = COALESCE(EXCLUDED.metric_c, analytics.metrics.metric_c),
+            readings = COALESCE(EXCLUDED.readings, analytics.metrics.readings),
+            output   = COALESCE(EXCLUDED.output,   analytics.metrics.output),
+            status   = COALESCE(EXCLUDED.status,   analytics.metrics.status),
+            limits   = COALESCE(EXCLUDED.limits,   analytics.metrics.limits),
+            lot_id   = COALESCE(EXCLUDED.lot_id,   analytics.metrics.lot_id)
+    `,
+		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
+		createdAt,
+		msg.MetricA, msg.MetricB, msg.MetricC,
+		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
+	)
+
 	if err != nil {
-		logger.Errorw("failed to marshal event metric data", "error", err, "msg", msg)
-		return err
+		logger.Errorw("failed to insert event metric", "error", err)
 	}
-
-	_, err = pool.Exec(ctx, `
-		INSERT INTO analytics.metrics
-			(tenant_id, machine_id, device_id, resolution, kind, created_at, data, lot_id, core_1, core_2, core_3)
-		VALUES ($1,$2,$3,'event','event',$4,$5,$6,$7,$8,$9)
-		ON CONFLICT (tenant_id, entity_id, resolution, kind, created_at)
-		DO UPDATE SET
-			data   = EXCLUDED.data,
-			lot_id = EXCLUDED.lot_id,
-			core_1 = COALESCE(EXCLUDED.core_1, analytics.metrics.core_1),
-			core_2 = COALESCE(EXCLUDED.core_2, analytics.metrics.core_2),
-			core_3 = COALESCE(EXCLUDED.core_3, analytics.metrics.core_3)
-	`, msg.TenantID, msg.MachineID, msg.DeviceID, createdAt, string(dataJSON), msg.LotID, msg.Core1, msg.Core2, msg.Core3)
-
-	if err != nil {
-		logger.Errorw("failed to insert event metric into analytics.metrics", "error", err, "msg", msg)
-	}
-
 	return err
 }
 
-// InsertRealtimeMetric inserts a realtime metric into analytics.raw_metrics
-// Previously wrote to analytics.realtime_metrics
+// InsertRealtimeMetric inserts into analytics.raw_metrics (new structure)
 func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.TelemetryMessage, logger *zap.SugaredLogger) error {
-	dataJSON, err := model.ValidateJSON(msg.Data)
+	readings, _ := model.ValidateJSON(msg.Readings)
+	output, _ := model.ValidateJSON(msg.Output)
+	status, _ := model.ValidateJSON(msg.Status)
+	limits, _ := model.ValidateJSON(msg.Limits)
+
+	_, err := pool.Exec(ctx, `
+        INSERT INTO analytics.raw_metrics
+            (tenant_id, device_id, machine_id, lot_id,
+             metric_a, metric_b, metric_c,
+             readings, output, status, limits,
+             created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+        ON CONFLICT (tenant_id, entity_id, created_at)
+        DO UPDATE SET
+            metric_a = EXCLUDED.metric_a,
+            metric_b = EXCLUDED.metric_b,
+            metric_c = EXCLUDED.metric_c,
+            readings = EXCLUDED.readings,
+            output   = EXCLUDED.output,
+            status   = EXCLUDED.status,
+            limits   = EXCLUDED.limits,
+            lot_id   = EXCLUDED.lot_id
+    `,
+		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
+		msg.MetricA, msg.MetricB, msg.MetricC,
+		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
+	)
+
 	if err != nil {
-		logger.Errorw("failed to marshal realtime data", "error", err, "msg", msg)
-		return err
+		logger.Errorw("failed to insert realtime metric", "error", err)
 	}
-
-	_, err = pool.Exec(ctx, `
-		INSERT INTO analytics.raw_metrics
-			(tenant_id, device_id, machine_id, core_1, core_2, core_3, data, lot_id, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-	`, msg.TenantID, msg.DeviceID, msg.MachineID, msg.Core1, msg.Core2, msg.Core3, string(dataJSON), msg.LotID)
-
-	if err != nil {
-		logger.Errorw("failed to insert into analytics.raw_metrics", "error", err, "msg", msg)
-	}
-
 	return err
 }
 
-// InsertRealtimeTrigger inserts a realtime signal into device.realtime_<device_name>
-// creates device.realtime_<device_id> if needed,
-// then inserts a single TRUE row to trigger Supabase Realtime.
+// nullableJSON returns nil if the JSON is empty/null, otherwise returns the string
+func nullableJSON(raw json.RawMessage) *string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	s := string(raw)
+	return &s
+}
+
+// InsertRealtimeTrigger — unchanged, still creates device.realtime_<device_id> table
 func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID string, logger *zap.SugaredLogger) error {
 	if deviceID == "" {
 		return fmt.Errorf("deviceID is required")
 	}
 
-	// sanitize: replace any illegal chars to make a valid table name
 	safeDeviceID := strings.ToLower(strings.ReplaceAll(deviceID, "-", "_"))
 	tableName := fmt.Sprintf("device.realtime_%s", safeDeviceID)
 
-	// ensure schema exists
 	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS device`); err != nil {
 		logger.Errorw("failed to ensure schema exists", "error", err)
 		return err
 	}
 
-	// ensure realtime table exists
 	createSQL := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			id BIGSERIAL PRIMARY KEY,
-			inserted BOOLEAN DEFAULT TRUE,
-			created_at TIMESTAMPTZ DEFAULT NOW()
-		)
-	`, tableName)
+        CREATE TABLE IF NOT EXISTS %s (
+            id         BIGSERIAL PRIMARY KEY,
+            inserted   BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    `, tableName)
 	if _, err := pool.Exec(ctx, createSQL); err != nil {
 		logger.Errorw("failed to create realtime table", "table", tableName, "error", err)
 		return err
 	}
 
-	// insert TRUE to trigger Supabase Realtime
-	insertSQL := fmt.Sprintf(`INSERT INTO %s (inserted) VALUES (TRUE)`, tableName)
-	if _, err := pool.Exec(ctx, insertSQL); err != nil {
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (inserted) VALUES (TRUE)`, tableName)); err != nil {
 		logger.Errorw("failed to insert realtime trigger", "table", tableName, "error", err)
 		return err
 	}
 
-	// optional: keep only last 1000 rows
 	cleanupSQL := fmt.Sprintf(`
-		DELETE FROM %s
-		WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT 1000)
-	`, tableName, tableName)
+        DELETE FROM %s
+        WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT 1000)
+    `, tableName, tableName)
 	if _, err := pool.Exec(ctx, cleanupSQL); err != nil {
 		logger.Warnw("cleanup failed", "table", tableName, "error", err)
 	}
 
-	// logger.Infow("realtime trigger inserted", "table", tableName)
 	return nil
 }
 

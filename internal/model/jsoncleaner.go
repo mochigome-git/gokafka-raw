@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 )
 
@@ -49,8 +50,13 @@ func cleanJSONSlice(slice []any) []any {
 	return cleaned
 }
 
-// validateJSON ensures the data can be marshaled to JSON
-func ValidateJSON(data map[string]any) ([]byte, error) {
-	cleaned := cleanJSONData(data)
-	return json.Marshal(cleaned)
+// ValidateJSON returns nil if empty/invalid, otherwise the raw bytes
+func ValidateJSON(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("invalid JSON")
+	}
+	return raw, nil
 }
