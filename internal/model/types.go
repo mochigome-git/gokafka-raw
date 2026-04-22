@@ -9,6 +9,7 @@ type TelemetryMessage struct {
 	DeviceID  *string `json:"device_id"`
 	MachineID *string `json:"machine_id"`
 	LotID     *string `json:"lot_id"`
+	Kind      *string `json:"kind"`
 
 	// Fast-path aggregatable slots
 	MetricA *float64 `json:"metric_a"`
@@ -28,6 +29,7 @@ type EventMetricMessage struct {
 	DeviceID  *string         `json:"device_id"`
 	MachineID *string         `json:"machine_id"`
 	LotID     *string         `json:"lot_id"`
+	Kind      *string         `json:"kind"`
 	MetricA   *float64        `json:"metric_a"`
 	MetricB   *float64        `json:"metric_b"`
 	MetricC   *float64        `json:"metric_c"`

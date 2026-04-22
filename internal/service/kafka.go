@@ -142,6 +142,7 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 				Output:    msg.Output,
 				Status:    msg.Status,
 				Limits:    msg.Limits,
+				Kind:      msg.Kind,
 			}
 
 			s.eventCh <- func() {

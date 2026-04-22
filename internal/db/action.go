@@ -54,15 +54,31 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 	status, _ := model.ValidateJSON(msg.Status)
 	limits, _ := model.ValidateJSON(msg.Limits)
 
+	// Resolve kind: use what the device sent, otherwise default to 'event'.
+	// Validate against the CHECK constraint to fail early with a clear log.
+	kind := "event"
+	if msg.Kind != nil && *msg.Kind != "" {
+		switch *msg.Kind {
+		case "agg", "event", "output":
+			kind = *msg.Kind
+		default:
+			logger.Warnw("invalid kind from device, defaulting to 'event'",
+				"received", *msg.Kind,
+				"tenant_id", msg.TenantID,
+				"device_id", msg.DeviceID)
+		}
+	}
+
 	_, err := pool.Exec(ctx, `
         INSERT INTO analytics.metrics
             (tenant_id, device_id, machine_id, lot_id,
-             resolution, created_at,
+             resolution, kind, created_at,
              metric_a, metric_b, metric_c,
              readings, output, status, limits)
-        VALUES ($1,$2,$3,$4,'event',$5,$6,$7,$8,$9,$10,$11,$12)
+        VALUES ($1,$2,$3,$4,'event',$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT (tenant_id, entity_id, resolution, created_at)
         DO UPDATE SET
+            kind     = EXCLUDED.kind,
             metric_a = COALESCE(EXCLUDED.metric_a, analytics.metrics.metric_a),
             metric_b = COALESCE(EXCLUDED.metric_b, analytics.metrics.metric_b),
             metric_c = COALESCE(EXCLUDED.metric_c, analytics.metrics.metric_c),
@@ -73,7 +89,7 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
             lot_id   = COALESCE(EXCLUDED.lot_id,   analytics.metrics.lot_id)
     `,
 		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
-		createdAt,
+		kind, createdAt,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
 	)
