@@ -21,6 +21,7 @@ type TelemetryMessage struct {
 	Output   json.RawMessage `json:"output"`   // pass/fail, counts (nil = pure sensor)
 	Status   json.RawMessage `json:"status"`   // device state, counters
 	Limits   json.RawMessage `json:"limits"`   // thresholds at time of capture
+	Energy   json.RawMessage `json:"energy"`   // electrical telemetry (V/I/P/kWh)
 }
 
 // Event metric message — subset used for event inserts
@@ -37,6 +38,7 @@ type EventMetricMessage struct {
 	Output    json.RawMessage `json:"output"`
 	Status    json.RawMessage `json:"status"`
 	Limits    json.RawMessage `json:"limits"`
+	Energy    json.RawMessage `json:"energy"`
 }
 
 // Added the key needed

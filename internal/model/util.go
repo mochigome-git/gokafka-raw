@@ -98,6 +98,7 @@ func (tm *TelemetryMessage) UnmarshalJSON(b []byte) error {
 	tm.Output = raw["output"]
 	tm.Status = raw["status"]
 	tm.Limits = raw["limits"]
+	tm.Energy = raw["energy"]
 
 	return nil
 }

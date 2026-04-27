@@ -19,18 +19,20 @@ func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.Telem
 	output, _ := model.ValidateJSON(msg.Output)
 	status, _ := model.ValidateJSON(msg.Status)
 	limits, _ := model.ValidateJSON(msg.Limits)
+	energy, _ := model.ValidateJSON(msg.Energy) // ← NEW
 
 	_, err := pool.Exec(ctx, `
         INSERT INTO telemetry.telemetry_raw
             (tenant_id, device_id, machine_id, lot_id,
              metric_a, metric_b, metric_c,
-             readings, output, status, limits,
+             readings, output, status, limits, energy,
              created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
     `,
 		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
+		nullableJSON(energy), // ← NEW
 	)
 
 	if err != nil {
@@ -53,9 +55,9 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 	output, _ := model.ValidateJSON(msg.Output)
 	status, _ := model.ValidateJSON(msg.Status)
 	limits, _ := model.ValidateJSON(msg.Limits)
+	energy, _ := model.ValidateJSON(msg.Energy) // ← NEW
 
 	// Resolve kind: use what the device sent, otherwise default to 'event'.
-	// Validate against the CHECK constraint to fail early with a clear log.
 	kind := "event"
 	if msg.Kind != nil && *msg.Kind != "" {
 		switch *msg.Kind {
@@ -74,8 +76,8 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
             (tenant_id, device_id, machine_id, lot_id,
              resolution, kind, created_at,
              metric_a, metric_b, metric_c,
-             readings, output, status, limits)
-        VALUES ($1,$2,$3,$4,'event',$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             readings, output, status, limits, energy)
+        VALUES ($1,$2,$3,$4,'event',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT (tenant_id, entity_id, resolution, created_at)
         DO UPDATE SET
             kind     = EXCLUDED.kind,
@@ -86,12 +88,14 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
             output   = COALESCE(EXCLUDED.output,   analytics.metrics.output),
             status   = COALESCE(EXCLUDED.status,   analytics.metrics.status),
             limits   = COALESCE(EXCLUDED.limits,   analytics.metrics.limits),
+            energy   = COALESCE(EXCLUDED.energy,   analytics.metrics.energy),
             lot_id   = COALESCE(EXCLUDED.lot_id,   analytics.metrics.lot_id)
     `,
 		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
 		kind, createdAt,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
+		nullableJSON(energy), // ← NEW
 	)
 
 	if err != nil {
@@ -106,14 +110,15 @@ func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.Tel
 	output, _ := model.ValidateJSON(msg.Output)
 	status, _ := model.ValidateJSON(msg.Status)
 	limits, _ := model.ValidateJSON(msg.Limits)
+	energy, _ := model.ValidateJSON(msg.Energy) // ← NEW
 
 	_, err := pool.Exec(ctx, `
         INSERT INTO analytics.raw_metrics
             (tenant_id, device_id, machine_id, lot_id,
              metric_a, metric_b, metric_c,
-             readings, output, status, limits,
+             readings, output, status, limits, energy,
              created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
         ON CONFLICT (tenant_id, entity_id, created_at)
         DO UPDATE SET
             metric_a = EXCLUDED.metric_a,
@@ -123,11 +128,13 @@ func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.Tel
             output   = EXCLUDED.output,
             status   = EXCLUDED.status,
             limits   = EXCLUDED.limits,
+            energy   = EXCLUDED.energy,
             lot_id   = EXCLUDED.lot_id
     `,
 		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
+		nullableJSON(energy), // ← NEW
 	)
 
 	if err != nil {
