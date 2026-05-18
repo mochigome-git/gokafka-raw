@@ -57,7 +57,7 @@ func (r *RealtimeService) CreateRealtimeClient(projectURL, apiKey string) error 
 	return nil
 }
 
-// StartConfigWatcher subscribes to realtime table changes.
+// StartConfigWatcher subscribes to realtime table changes + polling fallback.
 func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 	if r.client == nil {
 		return errors.New("realtime client not initialized")
@@ -74,10 +74,39 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 		time.Sleep(5000 * time.Millisecond)
 	}
 
+	// ── Polling fallback every 30s ────────────────────────────────────────
+	// Catches any inserts/updates that the websocket misses
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				configs, err := r.loadMetricConfigs()
+				if err != nil {
+					r.logger.Warnw("polling: failed to reload metric configs", "error", err)
+					continue
+				}
+				r.mu.Lock()
+				changed := len(configs) != len(r.metricConfigs)
+				r.metricConfigs = configs
+				r.mu.Unlock()
+				if changed {
+					r.logger.Infow("polling: metric configs changed, notifying listeners", "count", len(configs))
+					r.reloadMetricConfigs(configs)
+				}
+			}
+		}
+	}()
+
+	// ── Realtime websocket (primary) ──────────────────────────────────────
+	// Fix: empty Filter instead of "*" — wildcard is not valid syntax
 	return r.client.ListenToPostgresChanges(supabase_realtime.PostgresChangesOptions{
 		Schema: schema,
 		Table:  table,
-		Filter: "*",
+		Filter: "", // was "*" — invalid, caused INSERT events to be dropped
 	}, func(payload map[string]any) {
 		r.logger.Infow(fmt.Sprintf("%s changed", table), "payload", payload)
 
@@ -87,14 +116,8 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 			return
 		}
 
-		r.mu.Lock()
-		r.metricConfigs = configs
-		r.mu.Unlock()
-
-		//r.logger.Infow("metric configs reloaded", "count", len(configs))
 		r.reloadMetricConfigs(configs)
 	})
-
 }
 
 // loadMetricConfigs queries active configs directly from Realtime.
