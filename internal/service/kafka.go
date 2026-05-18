@@ -86,6 +86,12 @@ func (k *KafkaService) UpdateMetricConfigs(newConfigs []config.MetricConfig) {
 func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message, ctx context.Context, stats *db.InsertStats) {
 	entityID := resolveEntityID(msg)
 
+	// ── Take a snapshot of configs under read lock ────────────────────────
+	s.mu.RLock()
+	configs := make([]config.MetricConfig, len(s.MetricConfigs))
+	copy(configs, s.MetricConfigs)
+	s.mu.RUnlock()
+
 	// Telemetry raw
 	s.telemetryCh <- func() {
 		if err := db.InsertTelemetryRaw(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
@@ -96,37 +102,29 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 	}
 
 	// Metrics
-	for _, cfg := range s.MetricConfigs {
+	for _, cfg := range configs {
 		if cfg.TenantID != msg.TenantID || cfg.EntityID != entityID {
 			continue
 		}
 
 		switch cfg.Method {
 		case "realtime":
-			// atomic.AddInt32(&s.RealtimeCount, 1)
-			// fmt.Println(atomic.LoadInt32(&s.RealtimeCount), "realtime go")
-
 			s.realtimeCh <- func() {
 				if err := db.InsertRealtimeMetric(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
 					s.Logger.Errorw("failed to insert realtime metric", "error", err)
 				} else {
 					stats.IncrementRealtime()
-
 					if s.RealtimeHub != nil && msg.DeviceID != nil {
 						payload, _ := json.Marshal(msg)
-						// Fully non-blocking broadcast
 						go func(tid string, did string, mid *string, p []byte) {
 							machineID := ""
 							if mid != nil {
 								machineID = *mid
 							}
-
 							s.RealtimeHub.BroadcastTo(tid, did, machineID, p)
 						}(msg.TenantID, *msg.DeviceID, msg.MachineID, payload)
 					}
-
 				}
-
 			}
 
 		case "event":
@@ -145,9 +143,9 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 				Energy:    msg.Energy,
 				Kind:      msg.Kind,
 			}
-
+			kafkaTime := m.Time // capture before closure
 			s.eventCh <- func() {
-				if err := db.InsertEventMetric(ctx, s.DBMgr.Pool(), eventMsg, m.Time, s.Logger); err != nil {
+				if err := db.InsertEventMetric(ctx, s.DBMgr.Pool(), eventMsg, kafkaTime, s.Logger); err != nil {
 					s.Logger.Errorw("failed to insert event metric", "error", err)
 				} else {
 					stats.IncrementEvent()
@@ -159,7 +157,7 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 	// Realtime trigger
 	if msg.DeviceID != nil && *msg.DeviceID != "" {
 		deviceID := *msg.DeviceID
-		for _, cfg := range s.MetricConfigs {
+		for _, cfg := range configs {
 			if cfg.DeviceID == deviceID && cfg.IsRealtime && cfg.IsActive {
 				s.realtimeCh <- func() {
 					if err := db.InsertRealtimeTrigger(ctx, s.DBMgr.Pool(), deviceID, s.Logger); err != nil {
