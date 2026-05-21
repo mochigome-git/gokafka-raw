@@ -86,6 +86,20 @@ func (k *KafkaService) UpdateMetricConfigs(newConfigs []config.MetricConfig) {
 func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message, ctx context.Context, stats *db.InsertStats) {
 	entityID := resolveEntityID(msg)
 
+	// ── Heartbeat short-circuit ───────────────────────────────────────────
+	// telemetry_raw insert already bumps last_seen via UpdateDeviceOnline.
+	// We just need to skip the metric routing so it doesn't land in analytics.metrics.
+	if isHeartbeat(msg) {
+		s.telemetryCh <- func() {
+			if err := db.InsertTelemetryRaw(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
+				s.Logger.Errorw("failed to insert telemetry_raw (heartbeat)", "error", err)
+			} else {
+				stats.IncrementTelemetry()
+			}
+		}
+		return
+	}
+
 	// ── Take a snapshot of configs under read lock ────────────────────────
 	s.mu.RLock()
 	configs := make([]config.MetricConfig, len(s.MetricConfigs))

@@ -59,3 +59,8 @@ func (s *KafkaService) handleMessage(job ProcessJob) {
 
 	s.queueInserts(msg, job.Msg, job.Ctx, job.Stats)
 }
+
+// heatbeat detector
+func isHeartbeat(msg model.TelemetryMessage) bool {
+	return msg.Kind != nil && *msg.Kind == "heartbeat"
+}
