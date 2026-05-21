@@ -117,13 +117,14 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 
 	// Metrics
 	for _, cfg := range configs {
-		if cfg.TenantID != msg.TenantID || cfg.EntityID != entityID {
+		if cfg.TenantID != msg.TenantID || cfg.DeviceID != entityID {
 			continue
 		}
 
 		switch cfg.Method {
 		case "realtime":
 			s.realtimeCh <- func() {
+
 				if err := db.InsertRealtimeMetric(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
 					s.Logger.Errorw("failed to insert realtime metric", "error", err)
 				} else {

@@ -14,7 +14,6 @@ type MetricConfig struct {
 	ID              int
 	TenantID        string
 	DeviceID        string
-	EntityID        string
 	Method          string // "realtime", "fast", "event", "hour"
 	IntervalSeconds int
 	BucketLevel     string // "second", "minute", etc.

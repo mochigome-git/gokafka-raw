@@ -89,6 +89,7 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 					r.logger.Warnw("polling: failed to reload metric configs", "error", err)
 					continue
 				}
+				r.reloadMetricConfigs(configs) // always push, no length check
 				r.mu.Lock()
 				changed := len(configs) != len(r.metricConfigs)
 				r.metricConfigs = configs
@@ -129,7 +130,6 @@ func (r *RealtimeService) loadMetricConfigs() ([]config.MetricConfig, error) {
 	var rows []struct {
 		ID              int     `json:"id"`
 		TenantID        string  `json:"tenant_id"`
-		EntityID        string  `json:"entity_id"`
 		DeviceID        *string `json:"device_id"`
 		Method          string  `json:"method"`
 		IntervalSeconds int     `json:"interval_seconds"`
@@ -151,7 +151,6 @@ func (r *RealtimeService) loadMetricConfigs() ([]config.MetricConfig, error) {
 		configs[i] = config.MetricConfig{
 			ID:              row.ID,
 			TenantID:        row.TenantID,
-			EntityID:        row.EntityID,
 			DeviceID:        deref(row.DeviceID),
 			Method:          row.Method,
 			IntervalSeconds: row.IntervalSeconds,
@@ -180,7 +179,7 @@ func (r *RealtimeService) OnConfigUpdate(listener ConfigUpdateListener) {
 // Reload MertricConfig to update kafka consumer
 func (r *RealtimeService) reloadMetricConfigs(newConfigs []config.MetricConfig) {
 	r.mu.Lock()
-	r.metricConfigs = newConfigs
+	r.metricConfigs = newConfigs // always sync internal state
 	listeners := append([]ConfigUpdateListener(nil), r.listeners...)
 	r.mu.Unlock()
 

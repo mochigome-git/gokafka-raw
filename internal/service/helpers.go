@@ -11,9 +11,9 @@ func resolveEntityID(msg model.TelemetryMessage) string {
 	if msg.DeviceID != nil && *msg.DeviceID != "" {
 		return *msg.DeviceID
 	}
-	if msg.MachineID != nil && *msg.MachineID != "" {
-		return *msg.MachineID
-	}
+	// if msg.MachineID != nil && *msg.MachineID != "" {
+	// 	return *msg.MachineID
+	// }
 	return ""
 }
 
