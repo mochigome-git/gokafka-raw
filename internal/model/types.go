@@ -2,14 +2,15 @@ package model
 
 import (
 	"encoding/json"
+
+	jsoniter "github.com/json-iterator/go"
 )
 
 type TelemetryMessage struct {
-	TenantID  string  `json:"tenant_id"`
-	DeviceID  *string `json:"device_id"`
-	MachineID *string `json:"machine_id"`
-	LotID     *string `json:"lot_id"`
-	Kind      *string `json:"kind"`
+	TenantID string  `json:"tenant_id"`
+	DeviceID *string `json:"device_id"`
+	LotID    *string `json:"lot_id"`
+	Kind     *string `json:"kind"`
 
 	// Fast-path aggregatable slots
 	MetricA *float64 `json:"metric_a"`
@@ -23,6 +24,8 @@ type TelemetryMessage struct {
 	Limits   json.RawMessage `json:"limits"`   // thresholds at time of capture
 	Energy   json.RawMessage `json:"energy"`   // electrical telemetry (V/I/P/kWh)
 }
+
+// -----------------------------------------------------------------------------
 
 // Event metric message — subset used for event inserts
 type EventMetricMessage struct {
@@ -41,8 +44,34 @@ type EventMetricMessage struct {
 	Energy    json.RawMessage `json:"energy"`
 }
 
+// -----------------------------------------------------------------------------
+
 // Added the key needed
 type KafkaWrapper struct {
 	Payload string `json:"payload"`
 	// ignore other fields if not needed
 }
+
+// -----------------------------------------------------------------------------
+
+type StatusPayload struct {
+	FW      *string `json:"fw"`
+	TS      *string `json:"ts"`
+	Kind    *string `json:"kind"`
+	UptimeS *int64  `json:"uptime_s"`
+}
+
+var jsonFast = jsoniter.ConfigFastest
+
+func (m TelemetryMessage) ParseStatus() (*StatusPayload, error) {
+	if len(m.Status) == 0 {
+		return nil, nil
+	}
+	var s StatusPayload
+	if err := jsonFast.Unmarshal(m.Status, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// -----------------------------------------------------------------------------

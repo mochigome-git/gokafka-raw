@@ -19,20 +19,20 @@ func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.Telem
 	output, _ := model.ValidateJSON(msg.Output)
 	status, _ := model.ValidateJSON(msg.Status)
 	limits, _ := model.ValidateJSON(msg.Limits)
-	energy, _ := model.ValidateJSON(msg.Energy) // ← NEW
+	energy, _ := model.ValidateJSON(msg.Energy)
 
 	_, err := pool.Exec(ctx, `
         INSERT INTO telemetry.telemetry_raw
-            (tenant_id, device_id, machine_id, lot_id,
+            (tenant_id, device_id, lot_id,
              metric_a, metric_b, metric_c,
              readings, output, status, limits, energy,
              created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
     `,
-		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
+		msg.TenantID, msg.DeviceID, msg.LotID,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
-		nullableJSON(energy), // ← NEW
+		nullableJSON(energy),
 	)
 
 	if err != nil {
@@ -110,15 +110,15 @@ func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.Tel
 	output, _ := model.ValidateJSON(msg.Output)
 	status, _ := model.ValidateJSON(msg.Status)
 	limits, _ := model.ValidateJSON(msg.Limits)
-	energy, _ := model.ValidateJSON(msg.Energy) // ← NEW
+	energy, _ := model.ValidateJSON(msg.Energy)
 
 	_, err := pool.Exec(ctx, `
         INSERT INTO analytics.raw_metrics
-            (tenant_id, device_id, machine_id, lot_id,
+            (tenant_id, device_id, lot_id,
              metric_a, metric_b, metric_c,
              readings, output, status, limits, energy,
              created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
         ON CONFLICT (tenant_id, entity_id, created_at)
         DO UPDATE SET
             metric_a = EXCLUDED.metric_a,
@@ -131,10 +131,10 @@ func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.Tel
             energy   = EXCLUDED.energy,
             lot_id   = EXCLUDED.lot_id
     `,
-		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
+		msg.TenantID, msg.DeviceID, msg.LotID,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
-		nullableJSON(energy), // ← NEW
+		nullableJSON(energy),
 	)
 
 	if err != nil {

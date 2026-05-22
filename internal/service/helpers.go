@@ -62,5 +62,14 @@ func (s *KafkaService) handleMessage(job ProcessJob) {
 
 // heatbeat detector
 func isHeartbeat(msg model.TelemetryMessage) bool {
-	return msg.Kind != nil && *msg.Kind == "heartbeat"
+	if len(msg.Status) == 0 {
+		return false
+	}
+	var s struct {
+		Kind *string `json:"kind"`
+	}
+	if err := jsonFast.Unmarshal(msg.Status, &s); err != nil {
+		return false
+	}
+	return s.Kind != nil && *s.Kind == "heartbeat"
 }

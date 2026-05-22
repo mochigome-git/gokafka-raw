@@ -131,32 +131,27 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 					stats.IncrementRealtime()
 					if s.RealtimeHub != nil && msg.DeviceID != nil {
 						payload, _ := json.Marshal(msg)
-						go func(tid string, did string, mid *string, p []byte) {
-							machineID := ""
-							if mid != nil {
-								machineID = *mid
-							}
-							s.RealtimeHub.BroadcastTo(tid, did, machineID, p)
-						}(msg.TenantID, *msg.DeviceID, msg.MachineID, payload)
+						go func(tid string, did string, p []byte) {
+							s.RealtimeHub.BroadcastTo(tid, did, p)
+						}(msg.TenantID, *msg.DeviceID, payload)
 					}
 				}
 			}
 
 		case "event":
 			eventMsg := model.EventMetricMessage{
-				TenantID:  msg.TenantID,
-				DeviceID:  msg.DeviceID,
-				MachineID: msg.MachineID,
-				LotID:     msg.LotID,
-				MetricA:   msg.MetricA,
-				MetricB:   msg.MetricB,
-				MetricC:   msg.MetricC,
-				Readings:  msg.Readings,
-				Output:    msg.Output,
-				Status:    msg.Status,
-				Limits:    msg.Limits,
-				Energy:    msg.Energy,
-				Kind:      msg.Kind,
+				TenantID: msg.TenantID,
+				DeviceID: msg.DeviceID,
+				LotID:    msg.LotID,
+				MetricA:  msg.MetricA,
+				MetricB:  msg.MetricB,
+				MetricC:  msg.MetricC,
+				Readings: msg.Readings,
+				Output:   msg.Output,
+				Status:   msg.Status,
+				Limits:   msg.Limits,
+				Energy:   msg.Energy,
+				Kind:     msg.Kind,
 			}
 			kafkaTime := m.Time // capture before closure
 			s.eventCh <- func() {

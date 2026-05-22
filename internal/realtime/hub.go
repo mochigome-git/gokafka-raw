@@ -63,11 +63,9 @@ func (h *Hub) Unsubscribe(c *Client) {
 }
 
 // BroadcastTo sends message to all clients subscribed to either deviceID or machineID
-func (h *Hub) BroadcastTo(tenantID, deviceID, machineID string, msg []byte) {
+func (h *Hub) BroadcastTo(tenantID, deviceID string, msg []byte) {
 	// broadcast by deviceID
 	h.broadcastKey(SubscriptionKey{TenantID: tenantID, DeviceID: deviceID}, msg)
-	// broadcast by machineID
-	h.broadcastKey(SubscriptionKey{TenantID: tenantID, DeviceID: machineID}, msg)
 }
 
 // broadcastKey sends message to clients for a single subscription key
