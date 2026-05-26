@@ -17,6 +17,11 @@ import (
 
 // =====================================================================
 // Telemetry inserts
+//
+// Each insert path that lands new data we want dashboards to see calls
+// ringDoorbell(deviceID) at the end. The doorbell is a no-op when
+// is_realtime_socket=false in metric_method_config, so it's safe to
+// call on every insert — the gate is in shouldRingDoorbell().
 // =====================================================================
 
 // InsertTelemetryRaw inserts into telemetry.telemetry_raw (new structure)
@@ -47,6 +52,14 @@ func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.Telem
 	}
 
 	_ = UpdateDeviceOnline(ctx, pool, msg.DeviceID, logger)
+
+	// Ring the doorbell — telemetry_raw is upstream of raw_metrics, but
+	// the doorbell semantics are "fresh data exists somewhere for this
+	// device." Charts will refetch through resolveSource() and see
+	// whatever's there.
+	if msg.DeviceID != nil {
+		ringDoorbell(ctx, pool, *msg.DeviceID, logger)
+	}
 	return nil
 }
 
@@ -106,8 +119,16 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 
 	if err != nil {
 		logger.Errorw("failed to insert event metric", "error", err)
+		return err
 	}
-	return err
+
+	// Event widgets read from analytics.metrics — ring the doorbell so
+	// dashboards refresh. Only applicable when there's a device_id;
+	// machine-level events would need a separate doorbell scheme.
+	if msg.DeviceID != nil {
+		ringDoorbell(ctx, pool, *msg.DeviceID, logger)
+	}
+	return nil
 }
 
 // InsertRealtimeMetric inserts into analytics.raw_metrics (new structure)
@@ -145,8 +166,13 @@ func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.Tel
 
 	if err != nil {
 		logger.Errorw("failed to insert realtime metric", "error", err)
+		return err
 	}
-	return err
+
+	if msg.DeviceID != nil {
+		ringDoorbell(ctx, pool, *msg.DeviceID, logger)
+	}
+	return nil
 }
 
 // nullableJSON returns nil if the JSON is empty/null, otherwise returns the string
@@ -162,65 +188,85 @@ func nullableJSON(raw json.RawMessage) *string {
 // Realtime doorbell trigger
 //
 // Each device gets its own tiny table `device.realtime_<uuid>`. The
-// backend INSERTs a row whenever fresh telemetry lands; Supabase
-// Realtime broadcasts that INSERT to subscribed dashboards, which then
-// invalidate their React Query cache and re-fetch the actual data.
+// backend INSERTs a row whenever fresh data lands; Supabase Realtime
+// broadcasts that INSERT to subscribed dashboards, which invalidate
+// their React Query cache and re-fetch the actual data.
 //
 // Three setup steps are needed PER DEVICE and they all need to happen
 // exactly once:
 //   1. CREATE TABLE
-//   2. ENABLE RLS + permissive read policy (gated through
-//      metric_method_config.tenant_id + has_permission())
+//   2. ENABLE RLS + permissive read policy
 //   3. ADD TABLE to supabase_realtime publication
 //
 // We cache "setup done" in-process so we only run those steps the
 // first time we see a device after a restart. Steady-state inserts
 // run the hot path only (one INSERT + occasional cleanup).
+//
+// We also cache "is_realtime_socket flag" in-process with a short TTL
+// so we don't hammer metric_method_config on every telemetry message.
 // =====================================================================
 
 // realtimeSetupDone tracks which devices have had their doorbell table
 // fully set up since this process started. Keyed by deviceID.
 var realtimeSetupDone sync.Map // map[string]struct{}
 
-// insertCounter — how often we should bother running cleanup.
-// Cleanup runs on ~1 in N inserts to keep the hot path cheap.
+// socketFlagCache caches the is_realtime_socket flag per device to
+// avoid querying metric_method_config on every telemetry insert.
+type socketFlagEntry struct {
+	enabled  bool
+	expireAt time.Time
+}
+
+var (
+	socketFlagCache    sync.Map // map[string]socketFlagEntry
+	socketFlagCacheTTL = 60 * time.Second
+)
+
+// cleanupEveryNInserts — cleanup runs on ~1 in N inserts.
 const cleanupEveryNInserts = 100
 
-// InsertRealtimeTrigger inserts a ping row into the per-device doorbell
-// table, setting it up (with RLS + publication) on first use. Cleanup
-// runs probabilistically to keep the hot path cheap.
-func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID string, logger *zap.SugaredLogger) error {
+// ringDoorbell is the entry point called from every insert path. It
+// checks the cached socket flag, sets up the doorbell table on first
+// use, and inserts a ping row.
+//
+// Errors are logged but never returned — doorbell failure must not
+// fail the main telemetry insert. The data still lands; only the
+// realtime refresh is degraded.
+func ringDoorbell(ctx context.Context, pool *pgxpool.Pool, deviceID string, logger *zap.SugaredLogger) {
 	if deviceID == "" {
-		return fmt.Errorf("deviceID is required")
+		return
+	}
+
+	enabled, err := isSocketEnabled(ctx, pool, deviceID)
+	if err != nil {
+		logger.Warnw("doorbell: failed to check socket flag, skipping",
+			"device_id", deviceID, "error", err)
+		return
+	}
+	if !enabled {
+		return // socket off → don't ring
 	}
 
 	safeDeviceID := strings.ToLower(strings.ReplaceAll(deviceID, "-", "_"))
 	tableName := fmt.Sprintf("device.realtime_%s", safeDeviceID)
 
-	// ── One-time setup per device per process lifetime ────────────────
+	// One-time setup per device per process lifetime
 	if _, alreadyDone := realtimeSetupDone.Load(deviceID); !alreadyDone {
 		if err := setupDoorbellTable(ctx, pool, tableName, safeDeviceID, deviceID, logger); err != nil {
-			// Don't mark as done — we'll retry on the next insert. Log
-			// loudly so this device's broken realtime is visible.
 			logger.Errorw("doorbell setup failed — realtime will not work for this device until next attempt",
-				"device_id", deviceID,
-				"table", tableName,
-				"error", err)
-			return err
+				"device_id", deviceID, "table", tableName, "error", err)
+			return
 		}
 		realtimeSetupDone.Store(deviceID, struct{}{})
 	}
 
-	// ── Hot path: insert the ping ─────────────────────────────────────
+	// Hot path: insert the ping
 	if _, err := pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (inserted) VALUES (TRUE)`, tableName)); err != nil {
 		logger.Errorw("failed to insert realtime trigger", "table", tableName, "error", err)
-		return err
+		return
 	}
 
-	// ── Cleanup ~1% of the time ───────────────────────────────────────
-	// At 10 inserts/sec/device this runs ~6 times per minute, keeping
-	// the table within ~100 rows of the 1000 cap on average. Probabilistic
-	// (rather than every-N counter) avoids needing per-device locks.
+	// Probabilistic cleanup (~1% of inserts)
 	if rand.Intn(cleanupEveryNInserts) == 0 {
 		cleanupSQL := fmt.Sprintf(`
             DELETE FROM %s
@@ -230,13 +276,51 @@ func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID str
 			logger.Warnw("cleanup failed", "table", tableName, "error", err)
 		}
 	}
+}
 
-	return nil
+// isSocketEnabled checks whether any metric_method_config row for this
+// device has is_realtime_socket=true. Result is cached for 60s to keep
+// the hot path cheap.
+func isSocketEnabled(ctx context.Context, pool *pgxpool.Pool, deviceID string) (bool, error) {
+	// Cache hit?
+	if v, ok := socketFlagCache.Load(deviceID); ok {
+		entry := v.(socketFlagEntry)
+		if time.Now().Before(entry.expireAt) {
+			return entry.enabled, nil
+		}
+	}
+
+	// Cache miss or expired — query
+	var enabled bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM public.metric_method_config
+			WHERE device_id = $1 AND is_realtime_socket = TRUE
+		)
+	`, deviceID).Scan(&enabled)
+
+	if err != nil {
+		return false, err
+	}
+
+	socketFlagCache.Store(deviceID, socketFlagEntry{
+		enabled:  enabled,
+		expireAt: time.Now().Add(socketFlagCacheTTL),
+	})
+	return enabled, nil
+}
+
+// InvalidateSocketFlagCache lets callers (e.g. an admin endpoint that
+// toggles is_realtime_socket) force a refresh. Optional — if not
+// called, changes propagate within socketFlagCacheTTL.
+func InvalidateSocketFlagCache(deviceID string) {
+	socketFlagCache.Delete(deviceID)
 }
 
 // setupDoorbellTable runs the one-time DDL for a device's doorbell:
-// schema, table, RLS policy, and publication entry. Idempotent —
-// safe to call again if it fails partway through.
+// schema, table, RLS policy, and publication entry. Idempotent — safe
+// to call again if it fails partway through.
 func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safeDeviceID, deviceID string, logger *zap.SugaredLogger) error {
 	// 1. Schema
 	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS device`); err != nil {
@@ -255,10 +339,7 @@ func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safe
 		return fmt.Errorf("create table: %w", err)
 	}
 
-	// 3. RLS + permissive read policy
-	// The doorbell carries no payload (id, bool, timestamp), so the
-	// read gate is whether the user has dashboard 'view' permission
-	// on the device's tenant. has_permission() is the existing helper.
+	// 3. RLS + permissive read policy via has_permission()
 	rlsSQL := fmt.Sprintf(`
         ALTER TABLE %s ENABLE ROW LEVEL SECURITY;
 
@@ -290,7 +371,6 @@ func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safe
 	}
 
 	// 4. Add to realtime publication
-	// duplicate_object means it's already added — that's fine.
 	pubSQL := fmt.Sprintf(`
         DO $$
         BEGIN
@@ -304,6 +384,19 @@ func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safe
 	}
 
 	logger.Infow("doorbell table set up", "table", tableName)
+	return nil
+}
+
+// InsertRealtimeTrigger is kept for backwards compatibility with any
+// caller that explicitly rings the doorbell. New code should let the
+// insert paths above ring it automatically.
+//
+// Deprecated: use ringDoorbell via the standard insert paths instead.
+func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID string, logger *zap.SugaredLogger) error {
+	if deviceID == "" {
+		return fmt.Errorf("deviceID is required")
+	}
+	ringDoorbell(ctx, pool, deviceID, logger)
 	return nil
 }
 
