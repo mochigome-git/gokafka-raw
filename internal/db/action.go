@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"gokafka-raw/internal/model"
@@ -12,6 +14,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
+
+// =====================================================================
+// Telemetry inserts
+// =====================================================================
 
 // InsertTelemetryRaw inserts into telemetry.telemetry_raw (new structure)
 func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.TelemetryMessage, logger *zap.SugaredLogger) error {
@@ -55,7 +61,7 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 	output, _ := model.ValidateJSON(msg.Output)
 	status, _ := model.ValidateJSON(msg.Status)
 	limits, _ := model.ValidateJSON(msg.Limits)
-	energy, _ := model.ValidateJSON(msg.Energy) // ← NEW
+	energy, _ := model.ValidateJSON(msg.Energy)
 
 	// Resolve kind: use what the device sent, otherwise default to 'event'.
 	kind := "event"
@@ -95,7 +101,7 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
 		kind, createdAt,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
-		nullableJSON(energy), // ← NEW
+		nullableJSON(energy),
 	)
 
 	if err != nil {
@@ -152,7 +158,37 @@ func nullableJSON(raw json.RawMessage) *string {
 	return &s
 }
 
-// InsertRealtimeTrigger — unchanged, still creates device.realtime_<device_id> table
+// =====================================================================
+// Realtime doorbell trigger
+//
+// Each device gets its own tiny table `device.realtime_<uuid>`. The
+// backend INSERTs a row whenever fresh telemetry lands; Supabase
+// Realtime broadcasts that INSERT to subscribed dashboards, which then
+// invalidate their React Query cache and re-fetch the actual data.
+//
+// Three setup steps are needed PER DEVICE and they all need to happen
+// exactly once:
+//   1. CREATE TABLE
+//   2. ENABLE RLS + permissive read policy (gated through
+//      metric_method_config.tenant_id + has_permission())
+//   3. ADD TABLE to supabase_realtime publication
+//
+// We cache "setup done" in-process so we only run those steps the
+// first time we see a device after a restart. Steady-state inserts
+// run the hot path only (one INSERT + occasional cleanup).
+// =====================================================================
+
+// realtimeSetupDone tracks which devices have had their doorbell table
+// fully set up since this process started. Keyed by deviceID.
+var realtimeSetupDone sync.Map // map[string]struct{}
+
+// insertCounter — how often we should bother running cleanup.
+// Cleanup runs on ~1 in N inserts to keep the hot path cheap.
+const cleanupEveryNInserts = 100
+
+// InsertRealtimeTrigger inserts a ping row into the per-device doorbell
+// table, setting it up (with RLS + publication) on first use. Cleanup
+// runs probabilistically to keep the hot path cheap.
 func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID string, logger *zap.SugaredLogger) error {
 	if deviceID == "" {
 		return fmt.Errorf("deviceID is required")
@@ -161,11 +197,53 @@ func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID str
 	safeDeviceID := strings.ToLower(strings.ReplaceAll(deviceID, "-", "_"))
 	tableName := fmt.Sprintf("device.realtime_%s", safeDeviceID)
 
-	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS device`); err != nil {
-		logger.Errorw("failed to ensure schema exists", "error", err)
+	// ── One-time setup per device per process lifetime ────────────────
+	if _, alreadyDone := realtimeSetupDone.Load(deviceID); !alreadyDone {
+		if err := setupDoorbellTable(ctx, pool, tableName, safeDeviceID, deviceID, logger); err != nil {
+			// Don't mark as done — we'll retry on the next insert. Log
+			// loudly so this device's broken realtime is visible.
+			logger.Errorw("doorbell setup failed — realtime will not work for this device until next attempt",
+				"device_id", deviceID,
+				"table", tableName,
+				"error", err)
+			return err
+		}
+		realtimeSetupDone.Store(deviceID, struct{}{})
+	}
+
+	// ── Hot path: insert the ping ─────────────────────────────────────
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (inserted) VALUES (TRUE)`, tableName)); err != nil {
+		logger.Errorw("failed to insert realtime trigger", "table", tableName, "error", err)
 		return err
 	}
 
+	// ── Cleanup ~1% of the time ───────────────────────────────────────
+	// At 10 inserts/sec/device this runs ~6 times per minute, keeping
+	// the table within ~100 rows of the 1000 cap on average. Probabilistic
+	// (rather than every-N counter) avoids needing per-device locks.
+	if rand.Intn(cleanupEveryNInserts) == 0 {
+		cleanupSQL := fmt.Sprintf(`
+            DELETE FROM %s
+            WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT 1000)
+        `, tableName, tableName)
+		if _, err := pool.Exec(ctx, cleanupSQL); err != nil {
+			logger.Warnw("cleanup failed", "table", tableName, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// setupDoorbellTable runs the one-time DDL for a device's doorbell:
+// schema, table, RLS policy, and publication entry. Idempotent —
+// safe to call again if it fails partway through.
+func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safeDeviceID, deviceID string, logger *zap.SugaredLogger) error {
+	// 1. Schema
+	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS device`); err != nil {
+		return fmt.Errorf("ensure schema: %w", err)
+	}
+
+	// 2. Table
 	createSQL := fmt.Sprintf(`
         CREATE TABLE IF NOT EXISTS %s (
             id         BIGSERIAL PRIMARY KEY,
@@ -174,29 +252,66 @@ func InsertRealtimeTrigger(ctx context.Context, pool *pgxpool.Pool, deviceID str
         )
     `, tableName)
 	if _, err := pool.Exec(ctx, createSQL); err != nil {
-		logger.Errorw("failed to create realtime table", "table", tableName, "error", err)
-		return err
+		return fmt.Errorf("create table: %w", err)
 	}
 
-	if _, err := pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (inserted) VALUES (TRUE)`, tableName)); err != nil {
-		logger.Errorw("failed to insert realtime trigger", "table", tableName, "error", err)
-		return err
+	// 3. RLS + permissive read policy
+	// The doorbell carries no payload (id, bool, timestamp), so the
+	// read gate is whether the user has dashboard 'view' permission
+	// on the device's tenant. has_permission() is the existing helper.
+	rlsSQL := fmt.Sprintf(`
+        ALTER TABLE %s ENABLE ROW LEVEL SECURITY;
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_policies
+                WHERE schemaname = 'device'
+                  AND tablename  = 'realtime_%s'
+                  AND policyname = 'doorbell_read_authorized'
+            ) THEN
+                CREATE POLICY doorbell_read_authorized
+                ON %s
+                FOR SELECT TO authenticated
+                USING (
+                    EXISTS (
+                        SELECT 1
+                        FROM public.metric_method_config c
+                        WHERE c.device_id = '%s'::uuid
+                          AND has_permission(c.tenant_id, 'dashboards', 'view')
+                    )
+                );
+            END IF;
+        END
+        $$;
+    `, tableName, safeDeviceID, tableName, deviceID)
+	if _, err := pool.Exec(ctx, rlsSQL); err != nil {
+		return fmt.Errorf("setup RLS: %w", err)
 	}
 
-	cleanupSQL := fmt.Sprintf(`
-        DELETE FROM %s
-        WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT 1000)
-    `, tableName, tableName)
-	if _, err := pool.Exec(ctx, cleanupSQL); err != nil {
-		logger.Warnw("cleanup failed", "table", tableName, "error", err)
+	// 4. Add to realtime publication
+	// duplicate_object means it's already added — that's fine.
+	pubSQL := fmt.Sprintf(`
+        DO $$
+        BEGIN
+            ALTER PUBLICATION supabase_realtime ADD TABLE %s;
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END
+        $$;
+    `, tableName)
+	if _, err := pool.Exec(ctx, pubSQL); err != nil {
+		return fmt.Errorf("add to publication: %w", err)
 	}
 
+	logger.Infow("doorbell table set up", "table", tableName)
 	return nil
 }
 
-func SelectTenantIDByUserID(ctx context.Context, pool *pgxpool.Pool, userID string,
-) (string, error) {
+// =====================================================================
+// Misc helpers
+// =====================================================================
 
+func SelectTenantIDByUserID(ctx context.Context, pool *pgxpool.Pool, userID string) (string, error) {
 	var tenantID string
 
 	err := pool.QueryRow(ctx, `
