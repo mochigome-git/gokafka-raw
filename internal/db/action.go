@@ -53,13 +53,12 @@ func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.Telem
 
 	_ = UpdateDeviceOnline(ctx, pool, msg.DeviceID, logger)
 
-	// Ring the doorbell — telemetry_raw is upstream of raw_metrics, but
-	// the doorbell semantics are "fresh data exists somewhere for this
-	// device." Charts will refetch through resolveSource() and see
-	// whatever's there.
-	if msg.DeviceID != nil {
-		ringDoorbell(ctx, pool, *msg.DeviceID, logger)
-	}
+	// NOTE: no doorbell ring here. telemetry_raw is the firehose —
+	// heartbeats and pre-aggregation data land here, and no widget
+	// reads it directly. The doorbell rings from InsertRealtimeMetric
+	// and InsertEventMetric (the paths that write to tables widgets
+	// actually read) so dashboards only refresh when there's something
+	// new to see.
 	return nil
 }
 
