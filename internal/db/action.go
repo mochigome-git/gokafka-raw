@@ -229,8 +229,7 @@ const cleanupEveryNInserts = 100
 // use, and inserts a ping row.
 //
 // Errors are logged but never returned — doorbell failure must not
-// fail the main telemetry insert. The data still lands; only the
-// realtime refresh is degraded.
+// fail the main telemetry insert.
 func ringDoorbell(ctx context.Context, pool *pgxpool.Pool, deviceID string, logger *zap.SugaredLogger) {
 	if deviceID == "" {
 		return
@@ -249,10 +248,12 @@ func ringDoorbell(ctx context.Context, pool *pgxpool.Pool, deviceID string, logg
 	safeDeviceID := strings.ToLower(strings.ReplaceAll(deviceID, "-", "_"))
 	tableName := fmt.Sprintf("device.realtime_%s", safeDeviceID)
 
-	// One-time setup per device per process lifetime
+	// One-time setup per device per process lifetime.
+	// If the INSERT fails later (e.g. table was dropped), the cache is
+	// cleared so setup re-runs on the next message.
 	if _, alreadyDone := realtimeSetupDone.Load(deviceID); !alreadyDone {
 		if err := setupDoorbellTable(ctx, pool, tableName, safeDeviceID, deviceID, logger); err != nil {
-			logger.Errorw("doorbell setup failed — realtime will not work for this device until next attempt",
+			logger.Errorw("doorbell setup failed — will retry on next message",
 				"device_id", deviceID, "table", tableName, "error", err)
 			return
 		}
@@ -261,18 +262,23 @@ func ringDoorbell(ctx context.Context, pool *pgxpool.Pool, deviceID string, logg
 
 	// Hot path: insert the ping
 	if _, err := pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (inserted) VALUES (TRUE)`, tableName)); err != nil {
-		logger.Errorw("failed to insert realtime trigger", "table", tableName, "error", err)
+		logger.Errorw("failed to insert realtime trigger — clearing setup cache for retry",
+			"table", tableName, "error", err)
+		// Clear cache so next message re-runs setupDoorbellTable.
+		// This handles the case where the table was dropped after
+		// the process started (e.g. manual DB cleanup, migration).
+		realtimeSetupDone.Delete(deviceID)
 		return
 	}
 
-	// Probabilistic cleanup (~1% of inserts)
+	// Probabilistic cleanup (~1 in N inserts)
 	if rand.Intn(cleanupEveryNInserts) == 0 {
 		cleanupSQL := fmt.Sprintf(`
             DELETE FROM %s
             WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT 1000)
         `, tableName, tableName)
 		if _, err := pool.Exec(ctx, cleanupSQL); err != nil {
-			logger.Warnw("cleanup failed", "table", tableName, "error", err)
+			logger.Warnw("doorbell: cleanup failed", "table", tableName, "error", err)
 		}
 	}
 }
@@ -325,6 +331,7 @@ func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safe
 	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS device`); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
 	}
+	logger.Infow("doorbell: schema ok", "table", tableName)
 
 	// 2. Table
 	createSQL := fmt.Sprintf(`
@@ -337,6 +344,7 @@ func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safe
 	if _, err := pool.Exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("create table: %w", err)
 	}
+	logger.Infow("doorbell: table ok", "table", tableName)
 
 	// 3. RLS + permissive read policy via has_permission()
 	rlsSQL := fmt.Sprintf(`
@@ -368,6 +376,7 @@ func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safe
 	if _, err := pool.Exec(ctx, rlsSQL); err != nil {
 		return fmt.Errorf("setup RLS: %w", err)
 	}
+	logger.Infow("doorbell: RLS ok", "table", tableName)
 
 	// 4. Add to realtime publication
 	pubSQL := fmt.Sprintf(`
@@ -381,6 +390,7 @@ func setupDoorbellTable(ctx context.Context, pool *pgxpool.Pool, tableName, safe
 	if _, err := pool.Exec(ctx, pubSQL); err != nil {
 		return fmt.Errorf("add to publication: %w", err)
 	}
+	logger.Infow("doorbell: publication ok", "table", tableName)
 
 	logger.Infow("doorbell table set up", "table", tableName)
 	return nil
