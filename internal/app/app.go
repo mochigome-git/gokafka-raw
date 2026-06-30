@@ -32,10 +32,36 @@ func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config,
 		HeartbeatInterval: 3 * time.Second,
 		SessionTimeout:    30 * time.Second,
 		Dialer: &kafka.Dialer{
-			TLS: cfg.CreateKafkaTLSConfig(),
+			Timeout:   10 * time.Second,
+			DualStack: true,
+			TLS:       cfg.CreateKafkaTLSConfig(),
 		},
+		Logger:      kafka.LoggerFunc(logger.Debugf),
+		ErrorLogger: kafka.LoggerFunc(logger.Errorf),
 	})
 	defer kafkaReader.Close()
+
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				st := kafkaReader.Stats()
+				logger.Infow("reader stats",
+					"messages", st.Messages,
+					"lag", st.Lag,
+					"offset", st.Offset,
+					"rebalances", st.Rebalances,
+					"timeouts", st.Timeouts,
+					"errors", st.Errors,
+					"dialTime_avg", st.DialTime.Avg,
+				)
+			}
+		}
+	}()
 
 	// Start insert summary monitor
 	stats := db.NewInsertStats()

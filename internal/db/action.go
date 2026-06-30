@@ -26,6 +26,12 @@ import (
 
 // InsertTelemetryRaw inserts into telemetry.telemetry_raw (new structure)
 func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.TelemetryMessage, logger *zap.SugaredLogger) error {
+
+	if msg.TenantID == "" {
+		logger.Warnw("skipping telemetry_raw insert: empty tenant_id", "device_id", msg.DeviceID)
+		return nil // or return an error if you prefer it counted
+	}
+
 	readings, _ := model.ValidateJSON(msg.Readings)
 	output, _ := model.ValidateJSON(msg.Output)
 	status, _ := model.ValidateJSON(msg.Status)
@@ -40,7 +46,7 @@ func InsertTelemetryRaw(ctx context.Context, pool *pgxpool.Pool, msg model.Telem
              created_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
     `,
-		msg.TenantID, msg.DeviceID, msg.LotID,
+		msg.TenantID, nullUUID(msg.DeviceID), nullUUID(msg.LotID),
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
 		nullableJSON(energy),
@@ -450,4 +456,11 @@ func UpdateDeviceOnline(ctx context.Context, pool *pgxpool.Pool, deviceID *strin
 	}
 
 	return err
+}
+
+func nullUUID(s *string) any {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return *s
 }

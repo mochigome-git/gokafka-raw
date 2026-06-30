@@ -84,6 +84,14 @@ func (k *KafkaService) UpdateMetricConfigs(newConfigs []config.MetricConfig) {
 }
 
 func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message, ctx context.Context, stats *db.InsertStats) {
+
+	// ── Guard: drop messages missing required UUIDs ──────────────────────
+	if msg.TenantID == "" {
+		s.Logger.Warnw("skipping message: empty tenant_id",
+			"device_id", msg.DeviceID, "partition", m.Partition, "offset", m.Offset)
+		return
+	}
+
 	entityID := resolveEntityID(msg)
 
 	// ── Heartbeat short-circuit ───────────────────────────────────────────

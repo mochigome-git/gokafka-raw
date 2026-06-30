@@ -43,8 +43,8 @@ func (c *Config) CreateKafkaTLSConfig() *tls.Config {
 
 	fmt.Printf("Kafka ServerName: '%s'\n", serverName)
 	return &tls.Config{
-		RootCAs:    rootCertPool,
-		ServerName: serverName, // must match SAN in certificate
+		RootCAs: rootCertPool,
+		//	ServerName: serverName, // must match SAN in certificate
 		MinVersion: tls.VersionTLS12,
 	}
 }
