@@ -115,7 +115,7 @@ func InsertEventMetric(ctx context.Context, pool *pgxpool.Pool, msg model.EventM
             energy   = COALESCE(EXCLUDED.energy,   analytics.metrics.energy),
             lot_id   = COALESCE(EXCLUDED.lot_id,   analytics.metrics.lot_id)
     `,
-		msg.TenantID, msg.DeviceID, msg.MachineID, msg.LotID,
+		msg.TenantID, msg.DeviceID, msg.MachineID, nullUUID(msg.LotID),
 		kind, createdAt,
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
@@ -163,7 +163,7 @@ func InsertRealtimeMetric(ctx context.Context, pool *pgxpool.Pool, msg model.Tel
             energy   = EXCLUDED.energy,
             lot_id   = EXCLUDED.lot_id
     `,
-		msg.TenantID, msg.DeviceID, msg.LotID,
+		msg.TenantID, msg.DeviceID, nullUUID(msg.LotID),
 		msg.MetricA, msg.MetricB, msg.MetricC,
 		nullableJSON(readings), nullableJSON(output), nullableJSON(status), nullableJSON(limits),
 		nullableJSON(energy),
