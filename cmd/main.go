@@ -28,6 +28,10 @@ func main() {
 	defer dbMgr.Shutdown()
 	dbMgr.StartAutoReconnect(ctx)
 
+	// FIX #2: start background eviction for socketFlagCache so stale
+	// device entries don't accumulate in memory indefinitely.
+	db.StartCacheEviction(ctx)
+
 	// --- Initialize Realtime Service ---
 	rtSvc, err := app.StartRealtimeApp(ctx, cfg, sugar)
 	if err != nil {
@@ -44,5 +48,4 @@ func main() {
 
 	// --- Run Kafka consumer app (blocking) ---
 	app.StartKafkaApp(ctx, dbMgr, cfg, sugar, rtSvc, hub)
-
 }

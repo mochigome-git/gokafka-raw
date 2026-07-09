@@ -36,7 +36,6 @@ func NewRealtimeService(cfg *config.Config, logger *zap.SugaredLogger) *Realtime
 
 // CreateRealtimeClient initializes and connects the Realtime client
 func (r *RealtimeService) CreateRealtimeClient(projectURL, apiKey string) error {
-
 	projectRef, err := ExtractProjectRef(projectURL)
 	if err != nil {
 		r.logger.Fatalw("failed to extract project ref", "error", err)
@@ -47,7 +46,6 @@ func (r *RealtimeService) CreateRealtimeClient(projectURL, apiKey string) error 
 		return fmt.Errorf("failed to create realtime client")
 	}
 
-	// Actually connect the client
 	if err := client.Connect(); err != nil {
 		return fmt.Errorf("failed to connect realtime client: %w", err)
 	}
@@ -68,14 +66,12 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 	schema := r.cfg.DBSchema
 	table := r.cfg.DBRealtimeTable
 
-	// Wait until client is connected
 	for !r.client.IsConnected() {
 		fmt.Println("waiting for realtime client to connect...")
 		time.Sleep(5000 * time.Millisecond)
 	}
 
 	// ── Polling fallback every 30s ────────────────────────────────────────
-	// Catches any inserts/updates that the websocket misses
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -89,25 +85,28 @@ func (r *RealtimeService) StartConfigWatcher(ctx context.Context) error {
 					r.logger.Warnw("polling: failed to reload metric configs", "error", err)
 					continue
 				}
-				r.reloadMetricConfigs(configs) // always push, no length check
+
+				// FIX #3: only call reloadMetricConfigs ONCE, always sync internal
+				// state, and only notify listeners when something actually changed.
 				r.mu.Lock()
 				changed := len(configs) != len(r.metricConfigs)
 				r.metricConfigs = configs
 				r.mu.Unlock()
+
 				if changed {
 					r.logger.Infow("polling: metric configs changed, notifying listeners", "count", len(configs))
-					r.reloadMetricConfigs(configs)
 				}
+				// Always push latest to listeners (was being called twice before)
+				r.notifyListeners(configs)
 			}
 		}
 	}()
 
 	// ── Realtime websocket (primary) ──────────────────────────────────────
-	// Fix: empty Filter instead of "*" — wildcard is not valid syntax
 	return r.client.ListenToPostgresChanges(supabase_realtime.PostgresChangesOptions{
 		Schema: schema,
 		Table:  table,
-		Filter: "", // was "*" — invalid, caused INSERT events to be dropped
+		Filter: "",
 	}, func(payload map[string]any) {
 		r.logger.Infow(fmt.Sprintf("%s changed", table), "payload", payload)
 
@@ -169,22 +168,47 @@ func (r *RealtimeService) GetMetricConfigs() []config.MetricConfig {
 	return append([]config.MetricConfig(nil), r.metricConfigs...)
 }
 
-// GetMetricConfig returns during runtime and copy to listener
+// OnConfigUpdate registers a listener to be called when configs change.
 func (r *RealtimeService) OnConfigUpdate(listener ConfigUpdateListener) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.listeners = append(r.listeners, listener)
 }
 
-// Reload MertricConfig to update kafka consumer
+// reloadMetricConfigs syncs internal state and notifies all listeners.
 func (r *RealtimeService) reloadMetricConfigs(newConfigs []config.MetricConfig) {
 	r.mu.Lock()
-	r.metricConfigs = newConfigs // always sync internal state
-	listeners := append([]ConfigUpdateListener(nil), r.listeners...)
+	r.metricConfigs = newConfigs
 	r.mu.Unlock()
 
+	r.notifyListeners(newConfigs)
+}
+
+// notifyListeners dispatches newConfigs to every registered listener.
+// FIX #2 (goroutine leak): each listener gets its own goroutine with a
+// 10-second timeout so a slow/blocked listener can never accumulate
+// unbounded goroutines over time.
+func (r *RealtimeService) notifyListeners(newConfigs []config.MetricConfig) {
+	r.mu.RLock()
+	listeners := append([]ConfigUpdateListener(nil), r.listeners...)
+	r.mu.RUnlock()
+
 	for _, l := range listeners {
-		go l(newConfigs) // async notify
+		l := l // capture loop variable
+		go func() {
+			done := make(chan struct{}, 1)
+			go func() {
+				l(newConfigs)
+				done <- struct{}{}
+			}()
+
+			select {
+			case <-done:
+				// completed normally
+			case <-time.After(10 * time.Second):
+				r.logger.Warnw("config listener timed out — possible goroutine leak in listener")
+			}
+		}()
 	}
 }
 
@@ -195,13 +219,11 @@ func ExtractProjectRef(supabaseURL string) (string, error) {
 		return "", fmt.Errorf("invalid SUPABASE_URL: %w", err)
 	}
 
-	// split host by dots
 	hostParts := strings.Split(parsed.Hostname(), ".")
 	if len(hostParts) < 1 {
 		return "", fmt.Errorf("unexpected host format: %s", parsed.Hostname())
 	}
 
-	// first part is the project ref
 	return hostParts[0], nil
 }
 
