@@ -30,6 +30,7 @@ type KafkaService struct {
 	telemetryCh chan func()   // telemetry insert
 	realtimeCh  chan func()   // realtime insert
 	eventCh     chan func()   // event insert
+	jobCh       chan func()   // job summary insert
 	insertSem   chan struct{} // semaphore to limit concurrent inserts
 
 	// Counters
@@ -58,6 +59,7 @@ func NewKafkaService(dbMgr *db.DBManager, logger *zap.SugaredLogger, metricConfi
 		telemetryCh: make(chan func(), 1000),
 		realtimeCh:  make(chan func(), 500),
 		eventCh:     make(chan func(), 500),
+		jobCh:       make(chan func(), 200),
 		insertSem:   make(chan struct{}, maxInsertWorkers),
 	}
 
@@ -71,6 +73,7 @@ func NewKafkaService(dbMgr *db.DBManager, logger *zap.SugaredLogger, metricConfi
 		go s.insertWorker(s.telemetryCh)
 		go s.insertWorker(s.realtimeCh)
 		go s.insertWorker(s.eventCh)
+		go s.insertWorker(s.jobCh)
 	}
 
 	return s
@@ -169,7 +172,32 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 					stats.IncrementEvent()
 				}
 			}
+
+		case "job":
+			if msg.DeviceID == nil || *msg.DeviceID == "" || msg.JobRef == nil || msg.StartedAt == nil || msg.EndedAt == nil {
+				s.Logger.Warnw("skipping job summary: missing required fields",
+					"tenant_id", msg.TenantID, "device_id", msg.DeviceID)
+				continue
+			}
+			jobMsg := model.JobSummaryMessage{
+				TenantID:  msg.TenantID,
+				DeviceID:  *msg.DeviceID,
+				LotID:     msg.LotID,
+				JobRef:    *msg.JobRef,
+				StartedAt: *msg.StartedAt,
+				EndedAt:   *msg.EndedAt,
+				Output:    msg.Output,
+			}
+			s.jobCh <- func() {
+				if err := db.InsertJobSummary(ctx, s.DBMgr.Pool(), jobMsg, s.Logger); err != nil {
+					s.Logger.Errorw("failed to insert job summary", "error", err)
+				} else {
+					stats.IncrementEvent()
+				}
+			}
+
 		}
+
 	}
 
 	// Realtime trigger

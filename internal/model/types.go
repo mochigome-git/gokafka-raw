@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"time"
 
 	jsoniter "github.com/json-iterator/go"
 )
@@ -11,6 +12,10 @@ type TelemetryMessage struct {
 	DeviceID *string `json:"device_id"`
 	LotID    *string `json:"lot_id"`
 	Kind     *string `json:"kind"`
+
+	JobRef    *string    `json:"job_ref"`
+	StartedAt *time.Time `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at"`
 
 	// Fast-path aggregatable slots
 	MetricA *float64 `json:"metric_a"`
@@ -23,6 +28,16 @@ type TelemetryMessage struct {
 	Status   json.RawMessage `json:"status"`   // device state, counters
 	Limits   json.RawMessage `json:"limits"`   // thresholds at time of capture
 	Energy   json.RawMessage `json:"energy"`   // electrical telemetry (V/I/P/kWh)
+}
+
+type JobSummaryMessage struct {
+	TenantID  string
+	DeviceID  string // required — machine_id resolved server-side via trigger
+	LotID     *string
+	JobRef    string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Output    json.RawMessage
 }
 
 // -----------------------------------------------------------------------------
