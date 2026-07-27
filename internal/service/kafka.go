@@ -88,7 +88,6 @@ func (k *KafkaService) UpdateMetricConfigs(newConfigs []config.MetricConfig) {
 
 func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message, ctx context.Context, stats *db.InsertStats) {
 
-	// ── Guard: drop messages missing required UUIDs ──────────────────────
 	if msg.TenantID == "" {
 		s.Logger.Warnw("skipping message: empty tenant_id",
 			"device_id", msg.DeviceID, "partition", m.Partition, "offset", m.Offset)
@@ -97,9 +96,6 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 
 	entityID := resolveEntityID(msg)
 
-	// ── Heartbeat short-circuit ───────────────────────────────────────────
-	// telemetry_raw insert already bumps last_seen via UpdateDeviceOnline.
-	// We just need to skip the metric routing so it doesn't land in analytics.metrics.
 	if isHeartbeat(msg) {
 		s.telemetryCh <- func() {
 			if err := db.InsertTelemetryRaw(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
@@ -111,13 +107,50 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 		return
 	}
 
-	// ── Take a snapshot of configs under read lock ────────────────────────
+	// ── Job summary short-circuit ─────────────────────────────────────────
+	// Job completion is signaled by the payload itself (kind == "job"),
+	// not by a per-device metric_configs entry — unlike realtime/event
+	// routing below, which is opt-in per device.
+	if msg.Kind != nil && *msg.Kind == "job" {
+		s.telemetryCh <- func() {
+			if err := db.InsertTelemetryRaw(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
+				s.Logger.Errorw("failed to insert telemetry_raw (job)", "error", err)
+			} else {
+				stats.IncrementTelemetry()
+			}
+		}
+
+		if msg.DeviceID == nil || *msg.DeviceID == "" || msg.StartedAt == nil || msg.EndedAt == nil {
+			s.Logger.Warnw("skipping job summary: missing required fields",
+				"tenant_id", msg.TenantID, "device_id", msg.DeviceID)
+			return
+		}
+		jobMsg := model.JobSummaryMessage{
+			TenantID:  msg.TenantID,
+			DeviceID:  *msg.DeviceID,
+			LotID:     msg.LotID,
+			JobRef:    *msg.JobRef,
+			StartedAt: *msg.StartedAt,
+			EndedAt:   *msg.EndedAt,
+			Output:    msg.Output,
+		}
+		s.jobCh <- func() {
+			if err := db.InsertJobSummary(ctx, s.DBMgr.Pool(), jobMsg, s.Logger); err != nil {
+				s.Logger.Errorw("failed to insert job summary", "error", err)
+			} else {
+				stats.IncrementEvent()
+			}
+		}
+		return
+	}
+
+	// ── Everything below here is unchanged: telemetry_raw + config-driven
+	// realtime/event routing for non-job messages ──────────────────────────
 	s.mu.RLock()
 	configs := make([]config.MetricConfig, len(s.MetricConfigs))
 	copy(configs, s.MetricConfigs)
 	s.mu.RUnlock()
 
-	// Telemetry raw
 	s.telemetryCh <- func() {
 		if err := db.InsertTelemetryRaw(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
 			s.Logger.Errorw("failed to insert telemetry_raw", "error", err)
@@ -126,16 +159,13 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 		}
 	}
 
-	// Metrics
 	for _, cfg := range configs {
 		if cfg.TenantID != msg.TenantID || cfg.DeviceID != entityID {
 			continue
 		}
-
 		switch cfg.Method {
 		case "realtime":
 			s.realtimeCh <- func() {
-
 				if err := db.InsertRealtimeMetric(ctx, s.DBMgr.Pool(), msg, s.Logger); err != nil {
 					s.Logger.Errorw("failed to insert realtime metric", "error", err)
 				} else {
@@ -164,7 +194,7 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 				Energy:   msg.Energy,
 				Kind:     msg.Kind,
 			}
-			kafkaTime := m.Time // capture before closure
+			kafkaTime := m.Time
 			s.eventCh <- func() {
 				if err := db.InsertEventMetric(ctx, s.DBMgr.Pool(), eventMsg, kafkaTime, s.Logger); err != nil {
 					s.Logger.Errorw("failed to insert event metric", "error", err)
@@ -172,35 +202,9 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 					stats.IncrementEvent()
 				}
 			}
-
-		case "job":
-			if msg.DeviceID == nil || *msg.DeviceID == "" || msg.JobRef == nil || msg.StartedAt == nil || msg.EndedAt == nil {
-				s.Logger.Warnw("skipping job summary: missing required fields",
-					"tenant_id", msg.TenantID, "device_id", msg.DeviceID)
-				continue
-			}
-			jobMsg := model.JobSummaryMessage{
-				TenantID:  msg.TenantID,
-				DeviceID:  *msg.DeviceID,
-				LotID:     msg.LotID,
-				JobRef:    *msg.JobRef,
-				StartedAt: *msg.StartedAt,
-				EndedAt:   *msg.EndedAt,
-				Output:    msg.Output,
-			}
-			s.jobCh <- func() {
-				if err := db.InsertJobSummary(ctx, s.DBMgr.Pool(), jobMsg, s.Logger); err != nil {
-					s.Logger.Errorw("failed to insert job summary", "error", err)
-				} else {
-					stats.IncrementEvent()
-				}
-			}
-
 		}
-
 	}
 
-	// Realtime trigger
 	if msg.DeviceID != nil && *msg.DeviceID != "" {
 		deviceID := *msg.DeviceID
 		for _, cfg := range configs {
@@ -215,7 +219,6 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 		}
 	}
 }
-
 func (s *KafkaService) EnqueueMessage(ctx context.Context, m kafka.Message, stats *db.InsertStats) {
 	s.processCh <- ProcessJob{Msg: m, Ctx: ctx, Stats: stats}
 }
