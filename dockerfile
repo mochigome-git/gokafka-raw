@@ -1,5 +1,5 @@
 # --- Stage 1: Build ---
-FROM golang:1.26.2-alpine AS builder
+FROM golang:1.26.5-alpine AS builder
 
 # Accept platform args from buildx
 ARG TARGETOS

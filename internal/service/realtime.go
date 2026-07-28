@@ -10,7 +10,8 @@ import (
 	"time"
 
 	"gokafka-raw/internal/config"
-	supabase_realtime "gokafka-raw/pkg/supabase-realtime"
+
+	supabase_realtime "github.com/mochigome-git/gorealtime-supabase"
 
 	"go.uber.org/zap"
 )
@@ -41,7 +42,7 @@ func (r *RealtimeService) CreateRealtimeClient(projectURL, apiKey string) error 
 		r.logger.Fatalw("failed to extract project ref", "error", err)
 	}
 
-	client := supabase_realtime.CreateRealtimeClient(projectRef, apiKey, r.logger.Desugar())
+	client := supabase_realtime.CreateRealtimeClient(apiKey, r.logger.Desugar(), projectRef+".supabase.co")
 	if client == nil {
 		return fmt.Errorf("failed to create realtime client")
 	}

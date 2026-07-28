@@ -107,6 +107,14 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 		return
 	}
 
+	/*
+		if msg.DeviceID != nil && *msg.DeviceID == "982a3960-9647-447a-97f0-55031607a47a" {
+			if b, err := json.MarshalIndent(msg, "", "  "); err == nil {
+				fmt.Printf("📩 parsed msg (offset=%d ts=%s): %s\n", m.Offset, m.Time, string(b))
+			}
+		}
+	*/
+
 	// ── Job summary short-circuit ─────────────────────────────────────────
 	// Job completion is signaled by the payload itself (kind == "job"),
 	// not by a per-device metric_configs entry — unlike realtime/event
@@ -120,16 +128,31 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 			}
 		}
 
-		if msg.DeviceID == nil || *msg.DeviceID == "" || msg.StartedAt == nil || msg.EndedAt == nil {
+		if msg.DeviceID == nil || *msg.DeviceID == "" ||
+			msg.StartedAt == nil || msg.EndedAt == nil {
 			s.Logger.Warnw("skipping job summary: missing required fields",
-				"tenant_id", msg.TenantID, "device_id", msg.DeviceID)
+				"tenant_id", msg.TenantID, "device_id", msg.DeviceID,
+				"started_at", msg.StartedAt, "ended_at", msg.EndedAt)
 			return
 		}
+
+		jobRef := ""
+		if msg.JobRef != nil && *msg.JobRef != "" {
+			jobRef = *msg.JobRef
+		} else {
+			// No job_ref from the device — fall back to a synthetic ref so
+			// we still get a row instead of colliding on job_ref="" for
+			// every ref-less job from this tenant.
+			jobRef = fmt.Sprintf("auto-%s-%d", *msg.DeviceID, msg.EndedAt.Unix())
+			s.Logger.Warnw("job_ref missing, using generated fallback",
+				"tenant_id", msg.TenantID, "device_id", msg.DeviceID, "generated_job_ref", jobRef)
+		}
+
 		jobMsg := model.JobSummaryMessage{
 			TenantID:  msg.TenantID,
 			DeviceID:  *msg.DeviceID,
 			LotID:     msg.LotID,
-			JobRef:    *msg.JobRef,
+			JobRef:    jobRef,
 			StartedAt: *msg.StartedAt,
 			EndedAt:   *msg.EndedAt,
 			Output:    msg.Output,

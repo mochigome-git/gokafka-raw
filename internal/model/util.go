@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // StringFloat64 stays — devices might still send numbers as strings
@@ -65,6 +66,31 @@ func (tm *TelemetryMessage) UnmarshalJSON(b []byte) error {
 		var s string
 		if json.Unmarshal(v, &s) == nil {
 			tm.LotID = &s
+		}
+	}
+
+	if v, ok := raw["kind"]; ok {
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			tm.Kind = &s
+		}
+	}
+	if v, ok := raw["job_ref"]; ok {
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			tm.JobRef = &s
+		}
+	}
+	if v, ok := raw["started_at"]; ok {
+		var t time.Time
+		if json.Unmarshal(v, &t) == nil {
+			tm.StartedAt = &t
+		}
+	}
+	if v, ok := raw["ended_at"]; ok {
+		var t time.Time
+		if json.Unmarshal(v, &t) == nil {
+			tm.EndedAt = &t
 		}
 	}
 
