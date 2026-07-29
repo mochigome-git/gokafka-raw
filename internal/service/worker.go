@@ -1,48 +1,59 @@
 package service
 
 import (
-	"gokafka-raw/internal/model"
+	"context"
+	"sync"
 	"sync/atomic"
 
+	"gokafka-raw/internal/model"
+
 	jsoniter "github.com/json-iterator/go"
+	"github.com/segmentio/kafka-go"
 )
 
 func resolveEntityID(msg model.TelemetryMessage) string {
 	if msg.DeviceID != nil && *msg.DeviceID != "" {
 		return *msg.DeviceID
 	}
-	// if msg.MachineID != nil && *msg.MachineID != "" {
-	// 	return *msg.MachineID
-	// }
 	return ""
 }
 
-// Worker loops
 func (s *KafkaService) processWorker() {
 	atomic.AddInt32(&s.activeProcessWorkers, 1)
 	defer atomic.AddInt32(&s.activeProcessWorkers, -1)
 
 	for job := range s.processCh {
+		s.pending.Add(1)
 		s.handleMessage(job)
+
+		go func(m kafka.Message, wg *sync.WaitGroup, ctx context.Context) {
+			defer s.pending.Done()
+			wg.Wait()
+			if safe := s.offsets.markDone(m.Partition, m.Offset); safe >= 0 {
+				commitMsg := kafka.Message{Topic: m.Topic, Partition: m.Partition, Offset: safe}
+				if err := s.Reader.CommitMessages(ctx, commitMsg); err != nil {
+					s.Logger.Errorw("failed to commit offset", "error", err, "partition", m.Partition, "offset", safe)
+				}
+			}
+		}(job.Msg, job.Wg, job.Ctx)
 	}
 }
 
-// insertWorker with atomic active count + semaphore
-func (s *KafkaService) insertWorker(ch chan func()) {
+// insertWorker now takes its own semaphore (CHANGED — was one shared
+// s.insertSem across all 4 channels, which capped total concurrency at
+// 10 regardless of channel count).
+func (s *KafkaService) insertWorker(ch chan func(), sem chan struct{}) {
 	atomic.AddInt32(&s.activeInsertWorkers, 1)
 	defer atomic.AddInt32(&s.activeInsertWorkers, -1)
 
 	for job := range ch {
-		s.insertSem <- struct{}{} // acquire semaphore
+		sem <- struct{}{}
 		job()
-		<-s.insertSem // release
+		<-sem
 	}
 }
 
-// Handle message & queue inserts
-var (
-	jsonFast = jsoniter.ConfigFastest
-)
+var jsonFast = jsoniter.ConfigFastest
 
 func (s *KafkaService) handleMessage(job ProcessJob) {
 	var wrapper model.KafkaWrapper
@@ -57,10 +68,9 @@ func (s *KafkaService) handleMessage(job ProcessJob) {
 		return
 	}
 
-	s.queueInserts(msg, job.Msg, job.Ctx, job.Stats)
+	s.queueInserts(msg, job.Msg, job.Ctx, job.Stats, job.Wg)
 }
 
-// heatbeat detector
 func isHeartbeat(msg model.TelemetryMessage) bool {
 	if len(msg.Status) == 0 {
 		return false

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,12 +24,16 @@ func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config,
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Resolve which numbered slot this instance should use
+	groupID := buildGroupID("gokafka-consumer", cfg.KafkaBrokers)
+	logger.Infow("kafka consumer group resolved", "groupID", groupID)
+
 	// Kafka Reader Setup
 	kafkaReader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:           cfg.KafkaBrokers,
 		Topic:             cfg.KafkaTopic,
-		GroupID:           "telemetry-consumer",
-		StartOffset:       kafka.FirstOffset,
+		GroupID:           groupID,
+		StartOffset:       kafka.LastOffset,
 		ReadLagInterval:   -1,
 		HeartbeatInterval: 3 * time.Second,
 		SessionTimeout:    30 * time.Second,
@@ -39,7 +45,6 @@ func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config,
 		Logger:      kafka.LoggerFunc(logger.Debugf),
 		ErrorLogger: kafka.LoggerFunc(logger.Errorf),
 	})
-	defer kafkaReader.Close()
 
 	go func() {
 		t := time.NewTicker(15 * time.Second)
@@ -69,10 +74,10 @@ func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config,
 
 	metricConfigs := rtSvc.GetMetricConfigs()
 
+	// kafkaSvc must exist before anything below references it
 	kafkaSvc := service.NewKafkaService(dbMgr, logger, metricConfigs, hub)
-	// listen for realtime config updates
+
 	rtSvc.OnConfigUpdate(func(updated []config.MetricConfig) {
-		// logger.Infow("KafkaService updating metric configs", "count", len(updated))
 		kafkaSvc.UpdateMetricConfigs(updated)
 	})
 
@@ -94,13 +99,25 @@ func StartKafkaApp(ctx context.Context, dbMgr *db.DBManager, cfg *config.Config,
 		logger.Info("Kafka consumer finished, exiting")
 	}
 
-	// Wait for consumer goroutine to finish
+	// Wait for consumer goroutine to finish reading
 	select {
 	case <-done:
 		logger.Info("Kafka consumer stopped gracefully")
 	case <-time.After(30 * time.Second):
 		logger.Warn("timeout waiting for Kafka consumer to stop")
 	}
+
+	// NEW — drain in-flight jobs (kafkaSvc now exists, and the reader is
+	// still open) before closing the reader. This must happen here, not
+	// above, both because kafkaSvc didn't exist yet up there, and because
+	// draining only makes sense after the read loop has actually stopped.
+	if kafkaSvc.WaitPending(15 * time.Second) {
+		logger.Info("all pending Kafka jobs drained cleanly")
+	} else {
+		logger.Warn("timed out waiting for pending Kafka jobs to drain")
+	}
+
+	kafkaReader.Close()
 
 	fmt.Println("✅ Kafka application shutdown completed")
 }
@@ -114,14 +131,12 @@ func StartRealtimeApp(ctx context.Context, cfg *config.Config, logger *zap.Sugar
 		return nil, err
 	}
 
-	// Start watcher in a separate goroutine
 	go func() {
 		if err := rtSvc.StartConfigWatcher(ctx); err != nil {
 			logger.Fatalw("failed to start realtime watcher", "error", err)
 		}
 	}()
 
-	// Load initial metric configs (blocking)
 	if err := rtSvc.LoadInitialMetricConfigs(); err != nil {
 		return nil, err
 	}
@@ -137,9 +152,67 @@ func StartWebsocketApp(ctx context.Context, cfg *config.Config, logger *zap.Suga
 		return err
 	}
 
-	// Store it globally
-	realtime.CachedJWKS = jwks // <- make sure this is your global variable
+	realtime.CachedJWKS = jwks
 
 	logger.Infow("Supabase JWKS fetched successfully")
 	return nil
+}
+
+// buildGroupID picks a slot from a numbered pool (base-1, base-2, ...).
+// It lists existing consumer groups on the broker, reuses the lowest-
+// numbered slot that isn't currently active (so a restart resumes that
+// slot's committed offsets instead of starting fresh), and only
+// allocates a brand-new number if every existing slot is currently in
+// use. NOTE: each slot is an independent consumer group — if more than
+// one slot is active at the same time, each reads the ENTIRE topic
+// independently, so downstream inserts must be idempotent.
+func buildGroupID(base string, brokers []string) string {
+	if gid := os.Getenv("KAFKA_GROUP_ID"); gid != "" {
+		return gid
+	}
+
+	conn, err := kafka.Dial("tcp", brokers[0])
+	if err != nil {
+		panic(fmt.Sprintf("buildGroupID: cannot dial broker: %v", err))
+	}
+	defer conn.Close()
+
+	client := &kafka.Client{Addr: conn.RemoteAddr()}
+	ctx := context.Background()
+
+	listResp, err := client.ListGroups(ctx, &kafka.ListGroupsRequest{})
+	if err != nil {
+		panic(fmt.Sprintf("buildGroupID: failed to list consumer groups: %v", err))
+	}
+
+	prefix := base + "-"
+	existing := map[int]bool{}
+	maxN := 0
+	for _, g := range listResp.Groups {
+		if !strings.HasPrefix(g.GroupID, prefix) {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimPrefix(g.GroupID, prefix)); err == nil {
+			existing[n] = true
+			if n > maxN {
+				maxN = n
+			}
+		}
+	}
+
+	for n := 1; n <= maxN; n++ {
+		if !existing[n] {
+			continue
+		}
+		gid := fmt.Sprintf("%s%d", prefix, n)
+		desc, err := client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{gid}})
+		if err != nil || len(desc.Groups) == 0 {
+			continue
+		}
+		if desc.Groups[0].GroupState != "Stable" {
+			return gid
+		}
+	}
+
+	return fmt.Sprintf("%s%d", prefix, maxN+1)
 }

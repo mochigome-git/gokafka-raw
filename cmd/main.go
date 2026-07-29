@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 
+	_ "go.uber.org/automaxprocs"
 	"go.uber.org/zap"
 
 	"gokafka-raw/internal/app"
