@@ -145,7 +145,7 @@ func StartRealtimeApp(ctx context.Context, cfg *config.Config, logger *zap.Sugar
 }
 
 func StartWebsocketApp(ctx context.Context, cfg *config.Config, logger *zap.SugaredLogger) error {
-	jwksURL := fmt.Sprintf(cfg.DBRealtimeURL)
+	jwksURL := cfg.DBRealtimeURL
 	jwks, err := realtime.FetchJWKS(jwksURL)
 	if err != nil {
 		logger.Fatalw("failed to fetch Supabase JWKS", "error", err)

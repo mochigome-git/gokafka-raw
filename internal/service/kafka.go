@@ -63,9 +63,9 @@ func NewKafkaService(dbMgr *db.DBManager, logger *zap.SugaredLogger, metricConfi
 	// the semaphores below control how many can actually be doing
 	// DB work (network I/O) at once, which is the real limiter.
 	const (
-		telemetryWorkers = 6
-		realtimeWorkers  = 6
-		eventWorkers     = 6
+		telemetryWorkers = 4
+		realtimeWorkers  = 4
+		eventWorkers     = 4
 		jobWorkers       = 3
 	)
 
@@ -190,6 +190,28 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 			defer wg.Done()
 			if err := db.InsertJobSummary(ctx, s.DBMgr.Pool(), jobMsg, s.Logger); err != nil {
 				s.Logger.Errorw("failed to insert job summary", "error", err)
+			} else {
+				stats.IncrementEvent()
+			}
+		}
+		return
+	}
+
+	if msg.Kind != nil && *msg.Kind == "lot" {
+		if msg.DeviceID == nil || *msg.DeviceID == "" {
+			s.Logger.Warnw("skipping lot: missing device_id", "tenant_id", msg.TenantID)
+			return
+		}
+
+		lotMsg := model.LotMessage{
+			MachineID: *msg.DeviceID,
+		}
+
+		wg.Add(1)
+		s.jobCh <- func() { // reusing jobCh/jobSem — lot inserts are rare, low volume
+			defer wg.Done()
+			if err := db.InsertLot(ctx, s.DBMgr.Pool(), lotMsg, s.Logger); err != nil {
+				s.Logger.Errorw("failed to insert lot", "error", err)
 			} else {
 				stats.IncrementEvent()
 			}

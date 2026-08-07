@@ -61,6 +61,14 @@ type EventMetricMessage struct {
 
 // -----------------------------------------------------------------------------
 
+// LotMessage represents a new-lot event published by an edge device.
+// It reuses the generic Kind-based routing already used for "job".
+type LotMessage struct {
+	MachineID string `json:"machine_id"`
+}
+
+// -----------------------------------------------------------------------------
+
 // Added the key needed
 type KafkaWrapper struct {
 	Payload string `json:"payload"`
