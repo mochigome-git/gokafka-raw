@@ -62,6 +62,12 @@ func (tm *TelemetryMessage) UnmarshalJSON(b []byte) error {
 			tm.DeviceID = &s
 		}
 	}
+	if v, ok := raw["machine_id"]; ok {
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			tm.MachineID = &s
+		}
+	}
 	if v, ok := raw["lot_id"]; ok {
 		var s string
 		if json.Unmarshal(v, &s) == nil {

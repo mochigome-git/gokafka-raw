@@ -8,10 +8,11 @@ import (
 )
 
 type TelemetryMessage struct {
-	TenantID string  `json:"tenant_id"`
-	DeviceID *string `json:"device_id"`
-	LotID    *string `json:"lot_id"`
-	Kind     *string `json:"kind"`
+	TenantID  string  `json:"tenant_id"`
+	DeviceID  *string `json:"device_id"`
+	MachineID *string `json:"machine_id"`
+	LotID     *string `json:"lot_id"`
+	Kind      *string `json:"kind"`
 
 	JobRef    *string    `json:"job_ref"`
 	StartedAt *time.Time `json:"started_at"`
