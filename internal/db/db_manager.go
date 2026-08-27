@@ -30,7 +30,7 @@ func NewDBManager(ctx context.Context, cfg *config.Config, logger *zap.SugaredLo
 	}
 
 	// Disable prepared statements to avoid the "prepared statement already exists" error
-	poolConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	poolConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
 
 	poolConfig.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		return nil
