@@ -225,7 +225,10 @@ func (s *KafkaService) queueInserts(msg model.TelemetryMessage, m kafka.Message,
 			JobRef:    jobRef,
 			StartedAt: *msg.StartedAt,
 			EndedAt:   *msg.EndedAt,
-			Output:    msg.Output,
+			// PLC wall-clock values get the tenant timezone in SQL
+			StartedAtLocal: msg.StartedAtLocal,
+			EndedAtLocal:   msg.EndedAtLocal,
+			Output:         msg.Output,
 		}
 		wg.Add(1)
 		s.jobCh <- func() {

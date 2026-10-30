@@ -17,6 +17,11 @@ type TelemetryMessage struct {
 	JobRef    *string    `json:"job_ref"`
 	StartedAt *time.Time `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at"`
+	// true when started_at/ended_at arrived WITHOUT an offset — PLC
+	// wall-clock time. The value above then carries a placeholder UTC
+	// zone; the database interprets it in the tenant's timezone.
+	StartedAtLocal bool `json:"-"`
+	EndedAtLocal   bool `json:"-"`
 
 	// Fast-path aggregatable slots
 	MetricA *float64 `json:"metric_a"`
@@ -38,7 +43,10 @@ type JobSummaryMessage struct {
 	JobRef    string
 	StartedAt time.Time
 	EndedAt   time.Time
-	Output    json.RawMessage
+	// see TelemetryMessage.StartedAtLocal
+	StartedAtLocal bool
+	EndedAtLocal   bool
+	Output         json.RawMessage
 }
 
 // -----------------------------------------------------------------------------

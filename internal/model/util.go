@@ -45,6 +45,34 @@ func parseStringFloat(v any) *float64 {
 	return &f
 }
 
+// localTimeLayouts are accepted for offset-less wall-clock times (PLC
+// registers). gopub-edge sends the first; the others are tolerated.
+var localTimeLayouts = []string{
+	"2006-01-02T15:04:05",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02 15:04:05",
+}
+
+// parseJobTime reads a JSON string timestamp. An RFC3339 value (with Z or
+// an offset) is a real instant: local=false. A value without an offset is
+// factory wall-clock time: it is returned with a placeholder UTC zone and
+// local=true, and must be converted with the tenant's timezone in SQL.
+func parseJobTime(v json.RawMessage) (t time.Time, local bool, ok bool) {
+	var s string
+	if json.Unmarshal(v, &s) != nil || s == "" {
+		return time.Time{}, false, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, false, true
+	}
+	for _, layout := range localTimeLayouts {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return t, true, true
+		}
+	}
+	return time.Time{}, false, false
+}
+
 // Custom unmarshaler only needed for metric_a/b/c — they might arrive as strings
 // Everything else (sections) is passed through as raw JSON untouched
 func (tm *TelemetryMessage) UnmarshalJSON(b []byte) error {
@@ -88,15 +116,15 @@ func (tm *TelemetryMessage) UnmarshalJSON(b []byte) error {
 		}
 	}
 	if v, ok := raw["started_at"]; ok {
-		var t time.Time
-		if json.Unmarshal(v, &t) == nil {
+		if t, local, ok := parseJobTime(v); ok {
 			tm.StartedAt = &t
+			tm.StartedAtLocal = local
 		}
 	}
 	if v, ok := raw["ended_at"]; ok {
-		var t time.Time
-		if json.Unmarshal(v, &t) == nil {
+		if t, local, ok := parseJobTime(v); ok {
 			tm.EndedAt = &t
+			tm.EndedAtLocal = local
 		}
 	}
 
